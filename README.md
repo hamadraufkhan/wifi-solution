@@ -40,6 +40,24 @@ sudo .venv/bin/python main.py
 
 Do **not** use `sudo python3 main.py` after a venv install — that bypasses `.venv` and will miss `customtkinter`.
 
+## Screenshots
+
+Interface selection:
+
+![Interface step](docs/screenshots/ui-01-interface.png)
+
+Network scan:
+
+![Scan step](docs/screenshots/ui-02-scan.png)
+
+Handshake capture:
+
+![Capture step](docs/screenshots/ui-03-capture.png)
+
+Wordlist crack:
+
+![Crack step](docs/screenshots/ui-04-crack.png)
+
 ## Workflow (GUI steps)
 
 1. **Interface** — list wireless NICs and select one  

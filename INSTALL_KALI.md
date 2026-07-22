@@ -92,6 +92,19 @@ chmod +x setup.sh run.sh
 
 ---
 
+## Screenshots
+
+See [README.md](README.md#screenshots) or `docs/screenshots/`:
+
+| Step | Image |
+|------|-------|
+| Interface | `docs/screenshots/ui-01-interface.png` |
+| Scan | `docs/screenshots/ui-02-scan.png` |
+| Capture | `docs/screenshots/ui-03-capture.png` |
+| Crack | `docs/screenshots/ui-04-crack.png` |
+
+---
+
 ## Troubleshooting
 
 | Issue | What to try |
