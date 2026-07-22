@@ -13,19 +13,32 @@ Use this tool **only** on networks you own or have **written authorization** to 
 - Wi-Fi adapter that supports **monitor mode** and **packet injection**
 - Python 3.10+
 
+## Install (Kali)
+
+Kali blocks system-wide pip (`externally-managed-environment`). Use a **virtualenv**:
+
 ```bash
 sudo apt update
-sudo apt install -y aircrack-ng python3-pip python3-tk
-pip install -r requirements.txt
+sudo apt install -y aircrack-ng python3-tk python3-venv python3-full
+chmod +x setup.sh run.sh
+./setup.sh
 ```
+
+Full walkthrough: [INSTALL_KALI.md](INSTALL_KALI.md)
 
 ## Run
 
-Monitor mode and injection need root:
+```bash
+./run.sh
+```
+
+Equivalent:
 
 ```bash
-sudo python3 main.py
+sudo .venv/bin/python main.py
 ```
+
+Do **not** use `sudo python3 main.py` after a venv install — that bypasses `.venv` and will miss `customtkinter`.
 
 ## Workflow (GUI steps)
 

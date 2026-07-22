@@ -15,16 +15,16 @@ Step-by-step guide to get **wifi-solution** (Aircrack-ng GUI) running on Kali Li
 
 ```bash
 sudo apt update
-sudo apt install -y git aircrack-ng python3-pip python3-tk python3-venv
+sudo apt install -y git aircrack-ng python3-pip python3-tk python3-venv python3-full
 ```
 
 | Package        | Purpose                                      |
 |----------------|----------------------------------------------|
 | `git`          | Clone this repository                        |
 | `aircrack-ng`  | `airmon-ng`, `airodump-ng`, `aireplay-ng`, etc. |
-| `python3-pip`  | Install Python dependencies                  |
 | `python3-tk`   | Tk GUI support (required by CustomTkinter)   |
-| `python3-venv` | Optional isolated virtual environment        |
+| `python3-venv` | Virtual environment (required on Kali)       |
+| `python3-full` | Ensures venv works fully                     |
 
 ---
 
@@ -36,61 +36,44 @@ git clone https://github.com/hamadraufkhan/wifi-solution.git
 cd wifi-solution
 ```
 
-Or download a ZIP from GitHub:
-
-1. Open [https://github.com/hamadraufkhan/wifi-solution](https://github.com/hamadraufkhan/wifi-solution)
-2. Click **Code → Download ZIP**
-3. Extract it, then:
-
-```bash
-cd ~/Downloads   # or wherever you extracted it
-unzip wifi-solution-main.zip
-cd wifi-solution-main
-```
+Or download a ZIP from GitHub, extract it, then `cd` into the folder.
 
 ---
 
-## 3. Install Python dependencies
+## 3. Install Python dependencies (use a venv)
 
-**Option A — system-wide (simple):**
+Kali blocks system-wide `pip3 install` (`externally-managed-environment` / PEP 668).  
+**Do not** run bare `pip3 install -r requirements.txt` on the system Python.
 
-```bash
-pip3 install -r requirements.txt
-```
-
-If Kali blocks system-wide pip installs, use:
+**Recommended — setup script:**
 
 ```bash
-pip3 install --break-system-packages -r requirements.txt
+chmod +x setup.sh run.sh
+./setup.sh
 ```
 
-**Option B — virtual environment (recommended):**
+**Manual equivalent:**
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt
 ```
 
-This installs:
-
-- `customtkinter`
-- `Pillow`
+This installs `customtkinter` and `Pillow` **inside `.venv` only**.
 
 ---
 
 ## 4. Run the application
 
-Monitor mode and packet injection need root:
+Monitor mode and packet injection need root. Use the **venv Python under sudo** (plain `sudo python3` will not see venv packages):
 
 ```bash
-sudo python3 main.py
+./run.sh
 ```
 
-If you used a venv, activate it first, then run with the venv’s Python under sudo:
+Or:
 
 ```bash
-source .venv/bin/activate
 sudo .venv/bin/python main.py
 ```
 
@@ -98,10 +81,14 @@ sudo .venv/bin/python main.py
 
 ## Quick checklist
 
-1. `sudo apt install -y git aircrack-ng python3-pip python3-tk`
-2. `git clone https://github.com/hamadraufkhan/wifi-solution.git && cd wifi-solution`
-3. `pip3 install -r requirements.txt`
-4. `sudo python3 main.py`
+```bash
+sudo apt install -y git aircrack-ng python3-tk python3-venv python3-full
+git clone https://github.com/hamadraufkhan/wifi-solution.git
+cd wifi-solution
+chmod +x setup.sh run.sh
+./setup.sh
+./run.sh
+```
 
 ---
 
@@ -109,10 +96,12 @@ sudo .venv/bin/python main.py
 
 | Issue | What to try |
 |-------|-------------|
-| `customtkinter` import error | Run `pip3 install -r requirements.txt` again |
+| `externally-managed-environment` | Use `./setup.sh` / a venv — do not use system `pip3` |
+| `Missing dependency: customtkinter` | You ran system `python3`. Use `sudo .venv/bin/python main.py` or `./run.sh` |
+| `customtkinter` import error after setup | Re-run `./setup.sh` |
 | No wireless interfaces listed | Plug in a USB Wi-Fi adapter; check `iwconfig` / `ip link` |
-| Monitor mode fails | Kill NetworkManager conflicts from the GUI **Monitor** step, or try another adapter/driver |
-| GUI does not open | Ensure `python3-tk` is installed: `sudo apt install -y python3-tk` |
+| Monitor mode fails | Use **Check kill** on the Monitor step; try another adapter/driver |
+| GUI does not open | `sudo apt install -y python3-tk` |
 
 ---
 

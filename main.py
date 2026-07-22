@@ -12,7 +12,11 @@ def main() -> int:
     except ImportError:
         print(
             "Missing dependency: customtkinter\n"
-            "Install with: pip install -r requirements.txt",
+            "On Kali, system pip is blocked. Use a venv:\n"
+            "  ./setup.sh\n"
+            "  sudo .venv/bin/python main.py\n"
+            "or: ./run.sh\n"
+            "(Do not use bare: sudo python3 main.py)",
             file=sys.stderr,
         )
         return 1
