@@ -92,10 +92,14 @@ class MonitorPage(PageBase):
         if ok and mon:
             self.app.set_status(f"Monitor: {mon}")
             self.app.log(f"Monitor mode enabled on {mon}")
+            if mon == iface:
+                self._append(
+                    f"Note: monitor is on {mon} itself (common for Realtek rtl8xxxu)."
+                )
         else:
             self.app.log(
                 "Failed to enable monitor mode. Adapter may lack support, "
-                "or you need to run with sudo."
+                "or you need to run with sudo. Try: Check kill, then Start again."
             )
         self.on_show()
 

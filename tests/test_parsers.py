@@ -42,6 +42,30 @@ eth0      no wireless extensions.
         out = "monitor mode vif enabled for [phy0]wlan0 on [phy0]wlan0mon"
         self.assertEqual(parse_airmon_monitor_iface(out), "wlan0mon")
 
+    def test_airmon_already_enabled_ifindex_quirk(self) -> None:
+        # RTL8188EUS / some airmon builds: "already enabled" + ifindex after on
+        out = (
+            "phy0\twlan0\t\trtl8xxxu\tRealtek\n"
+            "\t\t(mac80211 monitor mode already enabled for [phy0]wlan0 on [phy0]10)"
+        )
+        self.assertEqual(parse_airmon_monitor_iface(out), "wlan0")
+
+    def test_iw_monitor_ifaces(self) -> None:
+        from app.core.parsers import parse_iw_monitor_interfaces
+
+        out = """phy#0
+	Interface wlan0
+		ifindex 10
+		wdev 0x1
+		addr 00:11:22:33:44:55
+		type monitor
+		channel 1 (2412 MHz), width: 20 MHz
+	Interface wlan1
+		ifindex 11
+		type managed
+"""
+        self.assertEqual(parse_iw_monitor_interfaces(out), ["wlan0"])
+
     def test_handshake_line(self) -> None:
         line = " CH  6 ][ Elapsed: 12 s ][ 2024-01-01 00:00 ][ WPA handshake: AA:BB:CC:DD:EE:FF"
         self.assertEqual(

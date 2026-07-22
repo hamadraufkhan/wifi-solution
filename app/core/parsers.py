@@ -12,13 +12,20 @@ from app.core.state import AccessPoint, Station
 
 
 IWCONFIG_IFACE_RE = re.compile(r"^(\S+)\s+IEEE\s+802\.11", re.MULTILINE)
+# Matches: "enabled", "vif enabled", "already enabled", etc.
 AIRMON_ENABLED_RE = re.compile(
-    r"(?:monitor mode (?:vif )?enabled(?: for \S+)? on\s+)(\S+)",
+    r"monitor mode (?:vif )?(?:already )?enabled"
+    r"(?: for (\[phy\d+\])?(\S+))? on\s+(\S+)",
     re.IGNORECASE,
 )
 AIRMON_DISABLED_RE = re.compile(
-    r"(?:monitor mode (?:vif )?disabled(?: for \S+)? on\s+)(\S+)",
+    r"monitor mode (?:vif )?(?:already )?disabled"
+    r"(?: for (\[phy\d+\])?(\S+))? on\s+(\S+)",
     re.IGNORECASE,
+)
+IW_DEV_BLOCK_RE = re.compile(
+    r"Interface\s+(\S+)(.*?)(?=\nInterface\s+|\Z)",
+    re.IGNORECASE | re.DOTALL,
 )
 HANDSHAKE_LINE_RE = re.compile(r"WPA handshake:\s*([0-9A-Fa-f:]{17})", re.IGNORECASE)
 AIRCRACK_KEY_RE = re.compile(
@@ -65,19 +72,72 @@ def _strip_phy_prefix(name: str) -> str:
     return name
 
 
+def _is_plausible_iface(name: str) -> bool:
+    """Reject airmon quirks like printing ifindex '10' instead of a name."""
+    if not name:
+        return False
+    if name.isdigit():
+        return False
+    if len(name) > 64:
+        return False
+    return bool(re.match(r"^[A-Za-z][\w.\-]*$", name))
+
+
+def _pick_airmon_iface(match: re.Match[str]) -> Optional[str]:
+    """
+    airmon groups: (phy_prefix_optional, for_name, on_name)
+    Prefer a valid 'on' name; else the 'for' source interface.
+    """
+    for_name = _strip_phy_prefix(match.group(2) or "")
+    on_raw = match.group(3) or ""
+    on_name = _strip_phy_prefix(on_raw)
+    if _is_plausible_iface(on_name):
+        return on_name
+    if _is_plausible_iface(for_name):
+        # Some drivers/airmon builds enable monitor on the same iface
+        # and print ifindex after 'on' (e.g. on [phy0]10).
+        return for_name
+    return None
+
+
 def parse_airmon_monitor_iface(airmon_output: str) -> Optional[str]:
     """Extract monitor interface name from airmon-ng start output."""
     m = AIRMON_ENABLED_RE.search(airmon_output)
     if not m:
         return None
-    return _strip_phy_prefix(m.group(1))
+    return _pick_airmon_iface(m)
 
 
 def parse_airmon_disabled_iface(airmon_output: str) -> Optional[str]:
     m = AIRMON_DISABLED_RE.search(airmon_output)
     if not m:
         return None
-    return _strip_phy_prefix(m.group(1))
+    return _pick_airmon_iface(m)
+
+
+def parse_iw_monitor_interfaces(iw_dev_output: str) -> list[str]:
+    """Return interface names that are type monitor from `iw dev` output."""
+    found: list[str] = []
+    for m in IW_DEV_BLOCK_RE.finditer(iw_dev_output):
+        name = m.group(1).strip()
+        body = m.group(2)
+        if re.search(r"^\s*type\s+monitor\b", body, re.IGNORECASE | re.MULTILINE):
+            found.append(name)
+    return found
+
+
+def iface_is_monitor(iwconfig_or_iw_output: str, iface: str) -> bool:
+    """Heuristic: True if output indicates monitor mode for iface."""
+    # iwconfig: "Mode:Monitor"
+    block = re.search(
+        rf"^{re.escape(iface)}\s+.*?(?=^\S|\Z)",
+        iwconfig_or_iw_output,
+        re.MULTILINE | re.DOTALL,
+    )
+    if block and re.search(r"Mode:Monitor", block.group(0), re.IGNORECASE):
+        return True
+    # iw dev style
+    return iface in parse_iw_monitor_interfaces(iwconfig_or_iw_output)
 
 
 def _clean(cell: Optional[str]) -> str:

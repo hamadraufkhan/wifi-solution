@@ -99,25 +99,79 @@ class AircrackService:
         code, out = self._helper.run_capture(["airmon-ng", "start", interface])
         self._emit(out.strip() or "(no output)")
         mon = parsers.parse_airmon_monitor_iface(out)
+
         if not mon:
-            # Common fallback naming
-            guess = f"{interface}mon" if not interface.endswith("mon") else interface
-            # Verify it exists
-            ifaces = self.list_interfaces()
-            if guess in ifaces:
-                mon = guess
-            else:
-                # Look for any *mon interface newly present
-                for name in ifaces:
-                    if name.endswith("mon"):
-                        mon = name
-                        break
+            mon = self._discover_monitor_iface(preferred=interface)
+
+        if not mon:
+            # Realtek (rtl8xxxu / RTL8188EUS) often needs iw instead of airmon-ng
+            self._emit(
+                "airmon-ng did not report a clear monitor iface; "
+                f"trying iw fallback on {interface}…"
+            )
+            ok_iw, iw_out = self._enable_monitor_via_iw(interface)
+            out = (out or "") + "\n" + iw_out
+            if ok_iw:
+                mon = interface
+
+        if not mon:
+            mon = self._discover_monitor_iface(preferred=interface)
+
         if mon:
             self.state.interface = interface
             self.state.monitor_interface = mon
             self._emit(f"Monitor interface: {mon}")
             return True, out, mon
         return False, out or "Could not determine monitor interface", None
+
+    def _discover_monitor_iface(self, preferred: Optional[str] = None) -> Optional[str]:
+        """Find an interface already in monitor mode via iw/iwconfig."""
+        code, iw_out = self._helper.run_capture(["iw", "dev"])
+        mons = parsers.parse_iw_monitor_interfaces(iw_out) if code == 0 or iw_out else []
+        if preferred and preferred in mons:
+            return preferred
+        if mons:
+            return mons[0]
+
+        # iwconfig fallback
+        _c, iwc = self._helper.run_capture(["iwconfig"])
+        if preferred and parsers.iface_is_monitor(iwc, preferred):
+            return preferred
+        ifaces = parsers.parse_wireless_interfaces(iwc)
+        for name in ifaces:
+            if parsers.iface_is_monitor(iwc, name):
+                return name
+        guess = None
+        if preferred:
+            guess = f"{preferred}mon" if not preferred.endswith("mon") else preferred
+            if guess in ifaces:
+                return guess
+        for name in ifaces:
+            if name.endswith("mon"):
+                return name
+        return None
+
+    def _enable_monitor_via_iw(self, interface: str) -> tuple[bool, str]:
+        """Set type monitor with iw (works on many mac80211 Realtek sticks)."""
+        logs: list[str] = []
+        for cmd in (
+            ["ip", "link", "set", interface, "down"],
+            ["iw", "dev", interface, "set", "type", "monitor"],
+            ["ip", "link", "set", interface, "up"],
+        ):
+            self._emit("Running: " + " ".join(cmd))
+            code, out = self._helper.run_capture(cmd)
+            chunk = out.strip() or f"(exit {code})"
+            logs.append(" ".join(cmd) + " -> " + chunk)
+            self._emit(chunk)
+            if code != 0 and "set type monitor" in " ".join(cmd):
+                return False, "\n".join(logs)
+
+        # Confirm
+        mon = self._discover_monitor_iface(preferred=interface)
+        if mon:
+            return True, "\n".join(logs)
+        return False, "\n".join(logs) + "\nMonitor mode not confirmed after iw fallback"
 
     def stop_monitor(self, mon_iface: Optional[str] = None) -> tuple[bool, str]:
         target = mon_iface or self.state.monitor_interface
@@ -127,10 +181,26 @@ class AircrackService:
         code, out = self._helper.run_capture(["airmon-ng", "stop", target])
         self._emit(out.strip() or "(no output)")
         restored = parsers.parse_airmon_disabled_iface(out)
+
+        # If still in monitor (airmon no-op / same-iface Realtek), restore via iw
+        still = self._discover_monitor_iface(preferred=target)
+        if still == target:
+            self._emit(f"Trying iw managed restore on {target}…")
+            for cmd in (
+                ["ip", "link", "set", target, "down"],
+                ["iw", "dev", target, "set", "type", "managed"],
+                ["ip", "link", "set", target, "up"],
+            ):
+                c, o = self._helper.run_capture(cmd)
+                self._emit((o.strip() or f"(exit {c})"))
+            restored = restored or target
+
         self.state.monitor_interface = None
         if restored:
             self.state.interface = restored
-        return code == 0, out
+        elif self.state.interface is None:
+            self.state.interface = target
+        return True, out
 
     # ------------------------------------------------------------------- scan
     @property
