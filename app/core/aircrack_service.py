@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -47,6 +48,7 @@ class AircrackService:
 
         self._scan_prefix: Optional[Path] = None
         self._capture_prefix: Optional[Path] = None
+        self._handshake_stop_scheduled = False
 
     # ------------------------------------------------------------------ utils
     def missing_binaries(self) -> list[str]:
@@ -303,6 +305,7 @@ class AircrackService:
         self.stop_capture()
         self.state.handshake_ready = False
         self.state.cracked_key = None
+        self._handshake_stop_scheduled = False
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_essid = re.sub(r"[^\w\-]+", "_", ap.essid or "unknown")[:32]
@@ -330,17 +333,17 @@ class AircrackService:
             if on_line:
                 on_line(line)
             hs = parsers.handshake_from_airodump_line(line)
-            if hs and not self.state.handshake_ready:
-                self.state.handshake_ready = True
-                self._emit(f"Handshake detected for {hs}")
-                if on_handshake:
-                    on_handshake()
+            if hs:
+                self._mark_handshake(
+                    reason=f"airodump: {hs}",
+                    on_handshake=on_handshake,
+                    auto_stop=True,
+                )
 
         def _done(code: int) -> None:
             self._emit(f"Capture process exited ({code})")
-            # Final handshake probe
             if not self.state.handshake_ready:
-                if self.probe_handshake():
+                if self.probe_handshake(auto_stop=False):
                     if on_handshake:
                         on_handshake()
             if on_done:
@@ -348,6 +351,42 @@ class AircrackService:
 
         self._capture_runner.start(cmd, on_line=_line, on_done=_done)
         return cap_path
+
+    def _mark_handshake(
+        self,
+        *,
+        reason: str,
+        on_handshake: Optional[Callable[[], None]] = None,
+        auto_stop: bool = True,
+    ) -> None:
+        first = not self.state.handshake_ready
+        self.state.handshake_ready = True
+        if first:
+            self._emit(f"Handshake detected ({reason})")
+            if on_handshake:
+                on_handshake()
+        if auto_stop:
+            self._schedule_auto_stop_capture()
+
+    def _schedule_auto_stop_capture(self) -> None:
+        """Stop airodump shortly after handshake so the .cap can flush."""
+        if getattr(self, "_handshake_stop_scheduled", False):
+            return
+        if not self._capture_runner.running:
+            return
+        self._handshake_stop_scheduled = True
+        self._emit("Handshake ready — stopping capture automatically…")
+
+        def _stop_soon() -> None:
+            # Give airodump time to flush EAPOL frames to the .cap
+            time.sleep(3.5)
+            if self._deauth_runner.running:
+                self._deauth_runner.stop(force=True)
+            if self._capture_runner.running:
+                self.stop_capture()
+                self._emit("Capture stopped (handshake captured)")
+
+        threading.Thread(target=_stop_soon, daemon=True).start()
 
     def stop_capture(self) -> None:
         if self._capture_runner.running:
@@ -381,7 +420,7 @@ class AircrackService:
 
         self._deauth_runner.start(cmd, on_line=_line, on_done=on_done)
 
-    def probe_handshake(self) -> bool:
+    def probe_handshake(self, *, auto_stop: bool = True) -> bool:
         cap = self.state.capture_cap_path
         if not cap or not cap.exists():
             return False
@@ -391,8 +430,10 @@ class AircrackService:
         )
         ready = parsers.aircrack_reports_handshake(out)
         if ready:
-            self.state.handshake_ready = True
-            self._emit("Handshake confirmed via aircrack-ng probe")
+            self._mark_handshake(
+                reason="aircrack-ng probe",
+                auto_stop=auto_stop and self.capturing,
+            )
         return ready
 
     # ------------------------------------------------------------------- crack

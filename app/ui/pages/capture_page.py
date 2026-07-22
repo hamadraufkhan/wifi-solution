@@ -125,12 +125,16 @@ class CapturePage(PageBase):
         self._cancel_poll()
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.app.set_status(f"Capture exited ({code})")
+        if self.app.state.handshake_ready:
+            self.app.set_status("Handshake captured — capture stopped")
+        else:
+            self.app.set_status(f"Capture exited ({code})")
         self._update_handshake_ui()
 
     def _on_handshake(self) -> None:
         self._update_handshake_ui()
-        self.app.set_status("Handshake captured")
+        self.app.set_status("Handshake captured — stopping capture…")
+        self.app.log("Handshake ready; capture will stop automatically.")
 
     def send_deauth(self) -> None:
         try:
@@ -179,10 +183,16 @@ class CapturePage(PageBase):
 
     def _poll(self) -> None:
         if not self.app.state.handshake_ready:
-            self.app.service.probe_handshake()
+            if self.app.service.probe_handshake(auto_stop=True):
+                self._on_handshake()
+        else:
             self._update_handshake_ui()
         if self.app.service.capturing:
             self._poll_id = self.after(2000, self._poll)
+        else:
+            self.btn_start.configure(state="normal")
+            self.btn_stop.configure(state="disabled")
+            self._update_handshake_ui()
 
     def goto_crack(self) -> None:
         if self.app.service.capturing:
