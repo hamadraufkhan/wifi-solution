@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.cursor/
+
+# Captures / airodump artifacts
+captures/*
+!captures/.gitkeep
+*.cap
+*.csv
+*.kismet.csv
+*.kismet.netxml
+*.log.csv
+*.hccapx
+*.hc22000
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
