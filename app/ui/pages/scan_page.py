@@ -24,7 +24,11 @@ class ScanPage(PageBase):
 
         ctk.CTkLabel(
             self,
-            text="Start airodump-ng and watch APs appear. Stop when you see your target.",
+            text=(
+                "Start airodump-ng and watch APs fill the table (from CSV). "
+                "If the list stays empty, go back and Start monitor again "
+                "(check kill must stop NetworkManager)."
+            ),
             text_color="gray70",
             wraplength=640,
             justify="left",
@@ -158,17 +162,17 @@ class ScanPage(PageBase):
         if not sel:
             return
         bssid = self.tree.item(sel[0], "values")[0]
-        for ap in self.app.state.access_points:
+        for ap in self.app.session.access_points:
             if ap.bssid == bssid:
-                self.app.state.selected_ap = ap
-                self.app.state.selected_client = None
+                self.app.session.selected_ap = ap
+                self.app.session.selected_client = None
                 self.app.log(f"Selected AP: {ap.essid or '(hidden)'} [{ap.bssid}] CH {ap.channel}")
                 break
 
     def goto_target(self) -> None:
-        if not self.app.state.selected_ap:
+        if not self.app.session.selected_ap:
             self._on_select()
-        if not self.app.state.selected_ap:
+        if not self.app.session.selected_ap:
             self.app.log("Select an AP from the table first.")
             return
         # Prefer stopped scan before capture, but allow continue

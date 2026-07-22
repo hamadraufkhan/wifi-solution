@@ -81,6 +81,28 @@ eth0      no wireless extensions.
         self.assertTrue(aircrack_reports_handshake("Opening capture.cap\n1 handshake"))
         self.assertFalse(aircrack_reports_handshake("No networks found"))
 
+    def test_airmon_bare_enabled(self) -> None:
+        from app.core.parsers import AIRMON_ENABLED_BARE_RE
+
+        out = "(monitor mode enabled)"
+        self.assertIsNotNone(AIRMON_ENABLED_BARE_RE.search(out))
+        self.assertIsNone(parse_airmon_monitor_iface(out))
+
+    def test_strip_ansi_filters_tui(self) -> None:
+        from app.core.parsers import is_useful_airodump_log_line, strip_ansi
+
+        noisy = "\x1b[0m\x1b[2J CH  6 ][ Elapsed: 0 s"
+        self.assertFalse(is_useful_airodump_log_line(noisy))
+        self.assertIn(
+            "WPA handshake",
+            strip_ansi("\x1b[37m WPA handshake: AA:BB:CC:DD:EE:FF"),
+        )
+        self.assertTrue(
+            is_useful_airodump_log_line(
+                " CH  6 ][ WPA handshake: AA:BB:CC:DD:EE:FF"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

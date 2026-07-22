@@ -24,8 +24,8 @@ class MonitorPage(PageBase):
         ctk.CTkLabel(
             self,
             text=(
-                "Kill processes that interfere with monitor mode, then enable it "
-                "on the selected interface. Requires root."
+                "Start monitor runs check kill automatically (stops NetworkManager). "
+                "That is required on Realtek sticks or scans stay empty."
             ),
             text_color="gray70",
             wraplength=640,
@@ -62,8 +62,8 @@ class MonitorPage(PageBase):
         )
 
     def on_show(self) -> None:
-        iface = self.app.state.interface or "(none)"
-        mon = self.app.state.monitor_interface or "(none)"
+        iface = self.app.session.interface or "(none)"
+        mon = self.app.session.monitor_interface or "(none)"
         self.info.configure(text=f"Managed interface: {iface}\nMonitor interface: {mon}")
 
     def _append(self, text: str) -> None:
@@ -76,13 +76,13 @@ class MonitorPage(PageBase):
         self.app.log("airmon-ng check kill finished" + ("" if ok else " with errors"))
 
     def do_start(self) -> None:
-        iface = self.app.state.interface
+        iface = self.app.session.interface
         if not iface:
             self.app.log("Select an interface first.")
             self.app.goto_step(0)
             return
         if iface.endswith("mon"):
-            self.app.state.monitor_interface = iface
+            self.app.session.monitor_interface = iface
             self._append(f"Already a monitor interface: {iface}")
             self.on_show()
             return
@@ -110,7 +110,7 @@ class MonitorPage(PageBase):
         self.on_show()
 
     def continue_next(self) -> None:
-        if not self.app.state.monitor_interface:
+        if not self.app.session.monitor_interface:
             self.app.log("Enable monitor mode before scanning.")
             return
         self.app.goto_step(2)

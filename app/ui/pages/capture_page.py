@@ -81,9 +81,9 @@ class CapturePage(PageBase):
         self.btn_crack.pack(side="right")
 
     def on_show(self) -> None:
-        ap = self.app.state.selected_ap
-        client = self.app.state.selected_client
-        mon = self.app.state.monitor_interface
+        ap = self.app.session.selected_ap
+        client = self.app.session.selected_client
+        mon = self.app.session.monitor_interface
         if ap:
             client_txt = client.station_mac if client else "(all / broadcast)"
             self.summary.configure(
@@ -94,8 +94,8 @@ class CapturePage(PageBase):
                 )
             )
         self._update_handshake_ui()
-        if self.app.state.capture_cap_path:
-            self.cap_path_label.configure(text=f"Capture file: {self.app.state.capture_cap_path}")
+        if self.app.session.capture_cap_path:
+            self.cap_path_label.configure(text=f"Capture file: {self.app.session.capture_cap_path}")
 
     def start_capture(self) -> None:
         try:
@@ -125,7 +125,7 @@ class CapturePage(PageBase):
         self._cancel_poll()
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        if self.app.state.handshake_ready:
+        if self.app.session.handshake_ready:
             self.app.set_status("Handshake captured — capture stopped")
         else:
             self.app.set_status(f"Capture exited ({code})")
@@ -158,13 +158,13 @@ class CapturePage(PageBase):
             self.app.log("No handshake found in capture yet.")
 
     def _update_handshake_ui(self) -> None:
-        if self.app.state.handshake_ready:
+        if self.app.session.handshake_ready:
             self.hs_badge.configure(text="Handshake: READY", text_color="#3cb371")
             self.btn_crack.configure(state="normal")
         else:
             self.hs_badge.configure(text="Handshake: waiting", text_color="#c9a227")
             # Allow proceed anyway if user has a cap (probe may lag)
-            if self.app.state.capture_cap_path and self.app.state.capture_cap_path.exists():
+            if self.app.session.capture_cap_path and self.app.session.capture_cap_path.exists():
                 self.btn_crack.configure(state="normal")
             else:
                 self.btn_crack.configure(state="disabled")
@@ -182,7 +182,7 @@ class CapturePage(PageBase):
             self._poll_id = None
 
     def _poll(self) -> None:
-        if not self.app.state.handshake_ready:
+        if not self.app.session.handshake_ready:
             if self.app.service.probe_handshake(auto_stop=True):
                 self._on_handshake()
         else:
@@ -200,8 +200,8 @@ class CapturePage(PageBase):
             self._cancel_poll()
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
-        if not self.app.state.handshake_ready:
+        if not self.app.session.handshake_ready:
             self.app.service.probe_handshake()
-        if not self.app.state.handshake_ready:
+        if not self.app.session.handshake_ready:
             self.app.log("Warning: handshake not confirmed — cracking may fail.")
         self.app.goto_step(5)

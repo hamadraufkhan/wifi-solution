@@ -34,8 +34,8 @@ class MainWindow(ctk.CTk):
         self.geometry("1100x720")
         self.minsize(900, 600)
 
-        self.state = SessionState()
-        self.service = AircrackService(self.state, log=self.log)
+        self.session = SessionState()
+        self.service = AircrackService(self.session, log=self.log)
 
         self._step = 0
         self._step_buttons: list[ctk.CTkButton] = []

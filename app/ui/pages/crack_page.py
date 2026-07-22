@@ -78,18 +78,18 @@ class CrackPage(PageBase):
         )
 
     def on_show(self) -> None:
-        cap = self.app.state.capture_cap_path
-        ap = self.app.state.selected_ap
+        cap = self.app.session.capture_cap_path
+        ap = self.app.session.selected_ap
         self.cap_label.configure(text=f"Capture: {cap}" if cap else "Capture: —")
         if ap:
             self.ap_label.configure(
                 text=f"BSSID: {ap.bssid}  |  ESSID: {ap.essid or '(hidden)'}"
             )
-        wl = self.app.state.wordlist_path
+        wl = self.app.session.wordlist_path
         if wl:
             self.wl_label.configure(text=str(wl))
-        if self.app.state.cracked_key:
-            self._show_key(self.app.state.cracked_key)
+        if self.app.session.cracked_key:
+            self._show_key(self.app.session.cracked_key)
 
     def browse(self) -> None:
         path = filedialog.askopenfilename(
@@ -100,12 +100,12 @@ class CrackPage(PageBase):
             ],
         )
         if path:
-            self.app.state.wordlist_path = Path(path)
+            self.app.session.wordlist_path = Path(path)
             self.wl_label.configure(text=path)
             self.app.log(f"Wordlist: {path}")
 
     def start_crack(self) -> None:
-        wl = self.app.state.wordlist_path
+        wl = self.app.session.wordlist_path
         if not wl:
             self.app.log("Select a wordlist first.")
             return

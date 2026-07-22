@@ -70,7 +70,7 @@ class TargetPage(PageBase):
         )
 
     def on_show(self) -> None:
-        ap = self.app.state.selected_ap
+        ap = self.app.session.selected_ap
         if ap:
             self.ap_label.configure(
                 text=f"AP: {ap.essid or '(hidden)'}  |  {ap.bssid}  |  CH {ap.channel}  |  {ap.privacy}"
@@ -82,7 +82,7 @@ class TargetPage(PageBase):
 
     def refresh(self) -> None:
         self.app.service.refresh_scan_results()
-        ap = self.app.state.selected_ap
+        ap = self.app.session.selected_ap
         for item in self.tree.get_children():
             self.tree.delete(item)
         if not ap:
@@ -100,31 +100,31 @@ class TargetPage(PageBase):
         if not sel:
             return
         mac = self.tree.item(sel[0], "values")[0]
-        ap = self.app.state.selected_ap
+        ap = self.app.session.selected_ap
         if not ap:
             return
         for sta in self.app.service.stations_for_ap(ap.bssid):
             if sta.station_mac == mac:
-                self.app.state.selected_client = sta
+                self.app.session.selected_client = sta
                 self.app.log(f"Selected client: {mac}")
                 break
         self._update_client_label()
 
     def clear_client(self) -> None:
-        self.app.state.selected_client = None
+        self.app.session.selected_client = None
         self.tree.selection_remove(self.tree.selection())
         self._update_client_label()
         self.app.log("Client cleared — deauth will target all clients on AP")
 
     def _update_client_label(self) -> None:
-        client = self.app.state.selected_client
+        client = self.app.session.selected_client
         if client:
             self.client_label.configure(text=f"Client: {client.station_mac}")
         else:
             self.client_label.configure(text="Client: (broadcast deauth)")
 
     def goto_capture(self) -> None:
-        if not self.app.state.selected_ap:
+        if not self.app.session.selected_ap:
             self.app.log("Select an AP first.")
             return
         # Stop scan so channel lock works cleanly

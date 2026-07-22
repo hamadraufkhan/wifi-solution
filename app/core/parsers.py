@@ -18,6 +18,11 @@ AIRMON_ENABLED_RE = re.compile(
     r"(?: for (\[phy\d+\])?(\S+))? on\s+(\S+)",
     re.IGNORECASE,
 )
+# Some drivers only print "(monitor mode enabled)" with no "on <iface>"
+AIRMON_ENABLED_BARE_RE = re.compile(
+    r"monitor mode (?:vif )?(?:already )?enabled(?!\s+for)",
+    re.IGNORECASE,
+)
 AIRMON_DISABLED_RE = re.compile(
     r"monitor mode (?:vif )?(?:already )?disabled"
     r"(?: for (\[phy\d+\])?(\S+))? on\s+(\S+)",
@@ -26,6 +31,9 @@ AIRMON_DISABLED_RE = re.compile(
 IW_DEV_BLOCK_RE = re.compile(
     r"Interface\s+(\S+)(.*?)(?=\nInterface\s+|\Z)",
     re.IGNORECASE | re.DOTALL,
+)
+ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)"
 )
 HANDSHAKE_LINE_RE = re.compile(r"WPA handshake:\s*([0-9A-Fa-f:]{17})", re.IGNORECASE)
 AIRCRACK_KEY_RE = re.compile(
@@ -103,9 +111,31 @@ def _pick_airmon_iface(match: re.Match[str]) -> Optional[str]:
 def parse_airmon_monitor_iface(airmon_output: str) -> Optional[str]:
     """Extract monitor interface name from airmon-ng start output."""
     m = AIRMON_ENABLED_RE.search(airmon_output)
-    if not m:
+    if m:
+        return _pick_airmon_iface(m)
+    # Bare "monitor mode enabled" — caller should fall back to preferred iface
+    if AIRMON_ENABLED_BARE_RE.search(airmon_output):
         return None
-    return _pick_airmon_iface(m)
+    return None
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
+def is_useful_airodump_log_line(line: str) -> bool:
+    """Filter airodump curses/TUI spam; keep handshake and quit notices."""
+    clean = strip_ansi(line).strip()
+    if not clean:
+        return False
+    lower = clean.lower()
+    if "wpa handshake" in lower:
+        return True
+    if lower.startswith("quitting"):
+        return True
+    if "failed" in lower or "error" in lower or "no such device" in lower:
+        return True
+    return False
 
 
 def parse_airmon_disabled_iface(airmon_output: str) -> Optional[str]:

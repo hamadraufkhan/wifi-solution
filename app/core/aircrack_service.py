@@ -34,7 +34,7 @@ class AircrackService:
         captures_dir: Optional[Path] = None,
         log: Optional[OnLine] = None,
     ) -> None:
-        self.state = state
+        self.session = state
         self.log = log or (lambda _msg: None)
         root = Path(__file__).resolve().parents[2]
         self.captures_dir = captures_dir or (root / "captures")
@@ -84,7 +84,7 @@ class AircrackService:
             # iwconfig exits non-zero sometimes when some ifaces lack wireless
             pass
         # Include current monitor iface if known
-        mon = self.state.monitor_interface
+        mon = self.session.monitor_interface
         if mon and mon not in ifaces:
             ifaces.append(mon)
         return sorted(set(ifaces))
@@ -96,17 +96,41 @@ class AircrackService:
         self._emit(out.strip() or "(no output)")
         return code == 0, out
 
-    def start_monitor(self, interface: str) -> tuple[bool, str, Optional[str]]:
+    def start_monitor(
+        self,
+        interface: str,
+        *,
+        auto_check_kill: bool = True,
+    ) -> tuple[bool, str, Optional[str]]:
+        # Already in monitor? Don't re-run airmon (avoids churn / NM fights).
+        existing = self._discover_monitor_iface(preferred=interface)
+        if existing:
+            self.session.interface = interface
+            self.session.monitor_interface = existing
+            msg = f"Monitor mode already active on {existing}"
+            self._emit(msg)
+            return True, msg, existing
+
+        if auto_check_kill:
+            self._emit(
+                "Auto check kill: stopping NetworkManager / wpa_supplicant "
+                "(required for reliable scanning)"
+            )
+            self.check_kill()
+
         self._emit(f"Running: airmon-ng start {interface}")
         code, out = self._helper.run_capture(["airmon-ng", "start", interface])
         self._emit(out.strip() or "(no output)")
         mon = parsers.parse_airmon_monitor_iface(out)
 
+        # Bare "(monitor mode enabled)" with no iface name → use selected iface
+        if not mon and parsers.AIRMON_ENABLED_BARE_RE.search(out or ""):
+            mon = interface
+
         if not mon:
             mon = self._discover_monitor_iface(preferred=interface)
 
         if not mon:
-            # Realtek (rtl8xxxu / RTL8188EUS) often needs iw instead of airmon-ng
             self._emit(
                 "airmon-ng did not report a clear monitor iface; "
                 f"trying iw fallback on {interface}…"
@@ -120,11 +144,42 @@ class AircrackService:
             mon = self._discover_monitor_iface(preferred=interface)
 
         if mon:
-            self.state.interface = interface
-            self.state.monitor_interface = mon
+            # Ensure the iface is administratively up
+            self._helper.run_capture(["ip", "link", "set", mon, "up"])
+            self.session.interface = interface
+            self.session.monitor_interface = mon
             self._emit(f"Monitor interface: {mon}")
             return True, out, mon
         return False, out or "Could not determine monitor interface", None
+
+    def prepare_for_scan(self) -> None:
+        """Re-assert monitor mode and kill interferers before airodump."""
+        mon = self.session.monitor_interface
+        if not mon:
+            raise RuntimeError("Monitor interface not set. Enable monitor mode first.")
+
+        # NM often restarts and breaks rtl8xxxu monitor mode mid-session
+        code, check_out = self._helper.run_capture(["airmon-ng", "check"])
+        if re.search(r"NetworkManager|wpa_supplicant|dhclient", check_out or "", re.I):
+            self._emit(
+                "Interfering processes detected — running check kill before scan"
+            )
+            self.check_kill()
+
+        still = self._discover_monitor_iface(preferred=mon)
+        if not still:
+            self._emit(f"Monitor mode lost on {mon}; re-enabling…")
+            iface = self.session.interface or mon
+            ok, _out, new_mon = self.start_monitor(iface, auto_check_kill=True)
+            if not ok or not new_mon:
+                raise RuntimeError(
+                    "Could not restore monitor mode. Click Check kill, then Start monitor."
+                )
+            mon = new_mon
+
+        self._helper.run_capture(["ip", "link", "set", mon, "up"])
+        self.session.monitor_interface = mon
+
 
     def _discover_monitor_iface(self, preferred: Optional[str] = None) -> Optional[str]:
         """Find an interface already in monitor mode via iw/iwconfig."""
@@ -176,7 +231,7 @@ class AircrackService:
         return False, "\n".join(logs) + "\nMonitor mode not confirmed after iw fallback"
 
     def stop_monitor(self, mon_iface: Optional[str] = None) -> tuple[bool, str]:
-        target = mon_iface or self.state.monitor_interface
+        target = mon_iface or self.session.monitor_interface
         if not target:
             return False, "No monitor interface set"
         self._emit(f"Running: airmon-ng stop {target}")
@@ -197,11 +252,11 @@ class AircrackService:
                 self._emit((o.strip() or f"(exit {c})"))
             restored = restored or target
 
-        self.state.monitor_interface = None
+        self.session.monitor_interface = None
         if restored:
-            self.state.interface = restored
-        elif self.state.interface is None:
-            self.state.interface = target
+            self.session.interface = restored
+        elif self.session.interface is None:
+            self.session.interface = target
         return True, out
 
     # ------------------------------------------------------------------- scan
@@ -215,21 +270,24 @@ class AircrackService:
         on_line: Optional[OnLine] = None,
         on_done: Optional[OnDone] = None,
     ) -> Path:
-        mon = self.state.monitor_interface
-        if not mon:
-            raise RuntimeError("Monitor interface not set. Enable monitor mode first.")
+        self.prepare_for_scan()
+        mon = self.session.monitor_interface
+        assert mon is not None
 
         self.stop_scan()
-        self.state.reset_scan()
+        self.session.reset_scan()
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prefix = self.captures_dir / f"scan_{stamp}"
         self._scan_prefix = prefix
         csv_path = Path(f"{prefix}-01.csv")
-        self.state.scan_csv_path = csv_path
+        self.session.scan_csv_path = csv_path
 
+        # --band bg: 2.4 GHz only (RTL8188EUS); avoids odd CH14 hopping noise
         cmd = [
             "airodump-ng",
+            "--band",
+            "bg",
             "--write-interval",
             "1",
             "-w",
@@ -239,16 +297,19 @@ class AircrackService:
             mon,
         ]
         self._emit("Starting scan: " + " ".join(cmd))
+        self._emit("AP list updates from CSV (airodump TUI spam is hidden).")
 
         def _line(line: str) -> None:
-            if on_line:
-                on_line(line)
+            # Never flood the GUI with curses escape sequences
+            if on_line and parsers.is_useful_airodump_log_line(line):
+                on_line(parsers.strip_ansi(line).strip())
 
         def _done(code: int) -> None:
             self._emit(f"Scan process exited ({code})")
             if on_done:
                 on_done(code)
 
+        # Discard most TUI output: still start reader so the pipe doesn't fill
         self._scan_runner.start(cmd, on_line=_line, on_done=_done)
         return csv_path
 
@@ -258,7 +319,7 @@ class AircrackService:
             self._scan_runner.stop()
 
     def refresh_scan_results(self) -> tuple[list[AccessPoint], list[Station]]:
-        path = self.state.scan_csv_path
+        path = self.session.scan_csv_path
         if not path:
             return [], []
         # airodump may still be writing; retry briefly
@@ -268,15 +329,15 @@ class AircrackService:
             if aps or stas:
                 break
             time.sleep(0.2)
-        self.state.access_points = aps
-        self.state.stations = stas
+        self.session.access_points = aps
+        self.session.stations = stas
         return aps, stas
 
     def stations_for_ap(self, bssid: str) -> list[Station]:
         bssid_l = bssid.lower()
         return [
             s
-            for s in self.state.stations
+            for s in self.session.stations
             if s.bssid.lower() == bssid_l and s.bssid.lower() != "(not associated)"
         ]
 
@@ -292,8 +353,14 @@ class AircrackService:
         on_done: Optional[OnDone] = None,
         on_handshake: Optional[Callable[[], None]] = None,
     ) -> Path:
-        mon = self.state.monitor_interface
-        ap = self.state.selected_ap
+        self.stop_capture()
+        self.session.handshake_ready = False
+        self.session.cracked_key = None
+        self._handshake_stop_scheduled = False
+
+        self.prepare_for_scan()
+        mon = self.session.monitor_interface
+        ap = self.session.selected_ap
         if not mon:
             raise RuntimeError("Monitor interface not set")
         if not ap:
@@ -302,18 +369,13 @@ class AircrackService:
         if not channel or channel == "-1":
             raise RuntimeError("Selected AP has no valid channel")
 
-        self.stop_capture()
-        self.state.handshake_ready = False
-        self.state.cracked_key = None
-        self._handshake_stop_scheduled = False
-
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_essid = re.sub(r"[^\w\-]+", "_", ap.essid or "unknown")[:32]
         prefix = self.captures_dir / f"cap_{safe_essid}_{stamp}"
         self._capture_prefix = prefix
-        self.state.capture_prefix = str(prefix)
+        self.session.capture_prefix = str(prefix)
         cap_path = Path(f"{prefix}-01.cap")
-        self.state.capture_cap_path = cap_path
+        self.session.capture_cap_path = cap_path
 
         cmd = [
             "airodump-ng",
@@ -330,9 +392,10 @@ class AircrackService:
         self._emit("Starting capture: " + " ".join(cmd))
 
         def _line(line: str) -> None:
-            if on_line:
-                on_line(line)
-            hs = parsers.handshake_from_airodump_line(line)
+            clean = parsers.strip_ansi(line).strip()
+            if on_line and parsers.is_useful_airodump_log_line(line):
+                on_line(clean)
+            hs = parsers.handshake_from_airodump_line(clean)
             if hs:
                 self._mark_handshake(
                     reason=f"airodump: {hs}",
@@ -342,7 +405,7 @@ class AircrackService:
 
         def _done(code: int) -> None:
             self._emit(f"Capture process exited ({code})")
-            if not self.state.handshake_ready:
+            if not self.session.handshake_ready:
                 if self.probe_handshake(auto_stop=False):
                     if on_handshake:
                         on_handshake()
@@ -359,8 +422,8 @@ class AircrackService:
         on_handshake: Optional[Callable[[], None]] = None,
         auto_stop: bool = True,
     ) -> None:
-        first = not self.state.handshake_ready
-        self.state.handshake_ready = True
+        first = not self.session.handshake_ready
+        self.session.handshake_ready = True
         if first:
             self._emit(f"Handshake detected ({reason})")
             if on_handshake:
@@ -400,9 +463,9 @@ class AircrackService:
         on_line: Optional[OnLine] = None,
         on_done: Optional[OnDone] = None,
     ) -> None:
-        mon = self.state.monitor_interface
-        ap = self.state.selected_ap
-        client = self.state.selected_client
+        mon = self.session.monitor_interface
+        ap = self.session.selected_ap
+        client = self.session.selected_client
         if not mon or not ap:
             raise RuntimeError("Monitor interface and AP required for deauth")
 
@@ -421,7 +484,7 @@ class AircrackService:
         self._deauth_runner.start(cmd, on_line=_line, on_done=on_done)
 
     def probe_handshake(self, *, auto_stop: bool = True) -> bool:
-        cap = self.state.capture_cap_path
+        cap = self.session.capture_cap_path
         if not cap or not cap.exists():
             return False
         code, out = self._helper.run_capture(
@@ -448,8 +511,8 @@ class AircrackService:
         on_line: Optional[OnLine] = None,
         on_done: Optional[Callable[[int, Optional[str]], None]] = None,
     ) -> None:
-        cap = self.state.capture_cap_path
-        ap = self.state.selected_ap
+        cap = self.session.capture_cap_path
+        ap = self.session.selected_ap
         if not cap or not cap.exists():
             raise RuntimeError(f"Capture file not found: {cap}")
         if not wordlist.exists():
@@ -457,8 +520,8 @@ class AircrackService:
         if not ap:
             raise RuntimeError("No AP selected")
 
-        self.state.wordlist_path = wordlist
-        self.state.cracked_key = None
+        self.session.wordlist_path = wordlist
+        self.session.cracked_key = None
 
         cmd = ["aircrack-ng", "-w", str(wordlist), "-b", ap.bssid, str(cap)]
         self._emit("Cracking: " + " ".join(cmd))
@@ -469,20 +532,20 @@ class AircrackService:
             buffer.append(line)
             key = parsers.parse_aircrack_key(line)
             if key:
-                self.state.cracked_key = key
+                self.session.cracked_key = key
                 self._emit(f"KEY FOUND: {key}")
             if on_line:
                 on_line(line)
 
         def _done(code: int) -> None:
             joined = "\n".join(buffer)
-            if not self.state.cracked_key:
+            if not self.session.cracked_key:
                 key = parsers.parse_aircrack_key(joined)
                 if key:
-                    self.state.cracked_key = key
+                    self.session.cracked_key = key
             self._emit(f"Crack process exited ({code})")
             if on_done:
-                on_done(code, self.state.cracked_key)
+                on_done(code, self.session.cracked_key)
 
         self._crack_runner.start(cmd, on_line=_line, on_done=_done)
 

@@ -70,7 +70,7 @@ class InterfacePage(PageBase):
             return
 
         self.status.configure(text=f"{len(ifaces)} interface(s)")
-        current = self.app.state.interface or self.app.state.monitor_interface or ""
+        current = self.app.session.interface or self.app.session.monitor_interface or ""
 
         for name in ifaces:
             row = ctk.CTkFrame(self.listbox, fg_color=("gray90", "gray20"))
@@ -90,10 +90,10 @@ class InterfacePage(PageBase):
         if not name:
             self.app.log("Select an interface first.")
             return
-        self.app.state.interface = name
+        self.app.session.interface = name
         # If user picked a monitor iface, keep it as monitor
         if name.endswith("mon"):
-            self.app.state.monitor_interface = name
+            self.app.session.monitor_interface = name
         self.app.log(f"Selected interface: {name}")
         self.app.set_status(f"Interface: {name}")
         self.app.goto_step(1)
