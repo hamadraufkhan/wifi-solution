@@ -15,6 +15,8 @@ class ScanPage(PageBase):
     def __init__(self, master: Any, app: Any) -> None:
         super().__init__(master, app)
         self._poll_id: str | None = None
+        self._poll_ticks = 0
+        self._diagnosed = False
 
         ctk.CTkLabel(
             self,
@@ -25,9 +27,8 @@ class ScanPage(PageBase):
         ctk.CTkLabel(
             self,
             text=(
-                "Start airodump-ng and watch APs fill the table (from CSV). "
-                "If the list stays empty, go back and Start monitor again "
-                "(check kill must stop NetworkManager)."
+                "Start scan runs check kill + monitor reset, then airodump. "
+                "Wait 10–15s for APs. If still empty, click Diagnose."
             ),
             text_color="gray70",
             wraplength=640,
@@ -52,6 +53,9 @@ class ScanPage(PageBase):
         )
         self.btn_stop.pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Refresh table", width=120, command=self.refresh_table).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(btn_row, text="Diagnose", width=100, command=self.diagnose).pack(
             side="left", padx=(0, 8)
         )
         self.scan_status = ctk.CTkLabel(btn_row, text="Idle", text_color="gray70")
@@ -88,6 +92,8 @@ class ScanPage(PageBase):
         self.refresh_table()
 
     def start_scan(self) -> None:
+        self._poll_ticks = 0
+        self._diagnosed = False
         try:
             self.app.service.start_scan(
                 on_line=lambda line: self.app.log(line),
@@ -100,6 +106,9 @@ class ScanPage(PageBase):
         self.btn_stop.configure(state="normal")
         self.scan_status.configure(text="Scanning…")
         self._schedule_poll()
+
+    def diagnose(self) -> None:
+        self.app.service.diagnose_empty_scan()
 
     def stop_scan(self) -> None:
         self.app.service.stop_scan()
@@ -115,6 +124,8 @@ class ScanPage(PageBase):
         self.btn_stop.configure(state="disabled")
         self.scan_status.configure(text=f"Exited ({code})")
         self.refresh_table()
+        if not self.app.session.access_points:
+            self.app.service.diagnose_empty_scan()
 
     def _schedule_poll(self) -> None:
         self._cancel_poll()
@@ -130,6 +141,16 @@ class ScanPage(PageBase):
 
     def _poll(self) -> None:
         self.refresh_table()
+        self._poll_ticks += 1
+        if (
+            not self._diagnosed
+            and self._poll_ticks >= 8
+            and not self.app.session.access_points
+            and self.app.service.scanning
+        ):
+            self._diagnosed = True
+            self.app.log("Still 0 APs after ~8s — running diagnostics…")
+            self.app.service.diagnose_empty_scan()
         if self.app.service.scanning:
             self._poll_id = self.after(1000, self._poll)
 

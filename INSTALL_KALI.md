@@ -112,9 +112,11 @@ See [README.md](README.md#screenshots) or `docs/screenshots/`:
 | `externally-managed-environment` | Use `./setup.sh` / a venv — do not use system `pip3` |
 | `Missing dependency: customtkinter` | You ran system `python3`. Use `sudo .venv/bin/python main.py` or `./run.sh` |
 | `customtkinter` import error after setup | Re-run `./setup.sh` |
+| Scan shows **0 APs** (RTL8188EUS / rtl8xxxu) | Start scan waits for check kill + iw monitor reset. Leave it 15s. Click **Diagnose**. If CSV is header-only while `iw` says `type monitor`, the stock `rtl8xxxu` driver often cannot RX in monitor mode — use aircrack-ng **rtl8188eus** driver or another adapter |
 | No wireless interfaces listed | Plug in a USB Wi-Fi adapter; check `iwconfig` / `ip link` |
 | Monitor mode fails | Use **Check kill** on the Monitor step; try another adapter/driver |
 | GUI does not open | `sudo apt install -y python3-tk` |
+| `SessionState object is not callable` | Update to latest code (`self.session` rename) and restart |
 
 ---
 

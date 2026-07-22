@@ -101,29 +101,39 @@ class AircrackService:
         interface: str,
         *,
         auto_check_kill: bool = True,
+        force_reset: bool = False,
     ) -> tuple[bool, str, Optional[str]]:
-        # Already in monitor? Don't re-run airmon (avoids churn / NM fights).
-        existing = self._discover_monitor_iface(preferred=interface)
-        if existing:
-            self.session.interface = interface
-            self.session.monitor_interface = existing
-            msg = f"Monitor mode already active on {existing}"
-            self._emit(msg)
-            return True, msg, existing
-
         if auto_check_kill:
             self._emit(
                 "Auto check kill: stopping NetworkManager / wpa_supplicant "
-                "(required for reliable scanning)"
+                "(required for reliable scanning on Realtek)"
             )
             self.check_kill()
+            self._helper.run_capture(["rfkill", "unblock", "all"])
+
+        existing = self._discover_monitor_iface(preferred=interface)
+        if existing and not force_reset:
+            # Soft path: still re-up + hard-reset via iw (rtl8xxxu often
+            # reports monitor but captures nothing until reset).
+            self._emit(
+                f"Monitor reported on {existing} — forcing iw reset so RX works…"
+            )
+            ok_iw, iw_out = self._enable_monitor_via_iw(existing)
+            self._emit(iw_out)
+            mon = existing if ok_iw else self._discover_monitor_iface(preferred=interface)
+            if mon:
+                self._helper.run_capture(["ip", "link", "set", mon, "up"])
+                self.session.interface = interface
+                self.session.monitor_interface = mon
+                self._emit(f"Monitor interface: {mon}")
+                self._log_iface_diag(mon)
+                return True, iw_out, mon
 
         self._emit(f"Running: airmon-ng start {interface}")
         code, out = self._helper.run_capture(["airmon-ng", "start", interface])
         self._emit(out.strip() or "(no output)")
         mon = parsers.parse_airmon_monitor_iface(out)
 
-        # Bare "(monitor mode enabled)" with no iface name → use selected iface
         if not mon and parsers.AIRMON_ENABLED_BARE_RE.search(out or ""):
             mon = interface
 
@@ -144,41 +154,107 @@ class AircrackService:
             mon = self._discover_monitor_iface(preferred=interface)
 
         if mon:
-            # Ensure the iface is administratively up
+            # Always finish with a clean iw monitor cycle for rtl8xxxu
+            self._emit(f"Hardening monitor on {mon} via iw…")
+            self._enable_monitor_via_iw(mon)
             self._helper.run_capture(["ip", "link", "set", mon, "up"])
             self.session.interface = interface
             self.session.monitor_interface = mon
             self._emit(f"Monitor interface: {mon}")
+            self._log_iface_diag(mon)
             return True, out, mon
         return False, out or "Could not determine monitor interface", None
 
     def prepare_for_scan(self) -> None:
-        """Re-assert monitor mode and kill interferers before airodump."""
+        """Always check-kill + force monitor reset before airodump (Realtek-safe)."""
         mon = self.session.monitor_interface
-        if not mon:
+        iface = self.session.interface or mon
+        if not mon and not iface:
             raise RuntimeError("Monitor interface not set. Enable monitor mode first.")
 
-        # NM often restarts and breaks rtl8xxxu monitor mode mid-session
-        code, check_out = self._helper.run_capture(["airmon-ng", "check"])
-        if re.search(r"NetworkManager|wpa_supplicant|dhclient", check_out or "", re.I):
-            self._emit(
-                "Interfering processes detected — running check kill before scan"
-            )
-            self.check_kill()
+        target = iface or mon
+        assert target is not None
 
-        still = self._discover_monitor_iface(preferred=mon)
-        if not still:
-            self._emit(f"Monitor mode lost on {mon}; re-enabling…")
-            iface = self.session.interface or mon
-            ok, _out, new_mon = self.start_monitor(iface, auto_check_kill=True)
+        self._emit("Preparing interface for scan (check kill + monitor reset)…")
+        self.check_kill()
+        self._helper.run_capture(["rfkill", "unblock", "all"])
+
+        ok_iw, iw_out = self._enable_monitor_via_iw(target)
+        self._emit(iw_out)
+        if not ok_iw:
+            # Last resort: airmon-ng start
+            ok, _out, new_mon = self.start_monitor(
+                target, auto_check_kill=False, force_reset=True
+            )
             if not ok or not new_mon:
                 raise RuntimeError(
-                    "Could not restore monitor mode. Click Check kill, then Start monitor."
+                    "Could not enable monitor mode. "
+                    "Try: Stop monitor → Start monitor, or replug the USB adapter."
                 )
-            mon = new_mon
+            target = new_mon
+        else:
+            target = target
 
-        self._helper.run_capture(["ip", "link", "set", mon, "up"])
-        self.session.monitor_interface = mon
+        still = self._discover_monitor_iface(preferred=target)
+        if not still:
+            raise RuntimeError(
+                f"{target} is not in monitor mode after reset. "
+                "rtl8xxxu may need a better driver (e.g. aircrack-ng rtl8188eus)."
+            )
+
+        self._helper.run_capture(["ip", "link", "set", still, "up"])
+        self.session.monitor_interface = still
+        if not self.session.interface:
+            self.session.interface = still
+        self._log_iface_diag(still)
+
+    def _log_iface_diag(self, iface: str) -> None:
+        _c, iw_out = self._helper.run_capture(["iw", "dev", iface, "info"])
+        snippet = (iw_out or "").strip() or "(no iw info)"
+        self._emit(f"iw {iface} info:\n{snippet}")
+        _c2, rf = self._helper.run_capture(["rfkill", "list"])
+        if rf and re.search(r"Soft blocked:\s*yes|Hard blocked:\s*yes", rf, re.I):
+            self._emit("WARNING: rfkill shows a block — ran unblock; replug if still blocked")
+            self._emit(rf.strip())
+
+    def diagnose_empty_scan(self) -> str:
+        """Explain why the AP table may be empty."""
+        lines: list[str] = []
+        path = self.session.scan_csv_path
+        if not path:
+            lines.append("No scan CSV path set.")
+        elif not path.exists():
+            lines.append(f"CSV missing: {path} (airodump may have failed to start)")
+        else:
+            size = path.stat().st_size
+            lines.append(f"CSV exists ({size} bytes): {path}")
+            try:
+                preview = path.read_text(encoding="utf-8", errors="replace")[:400]
+                lines.append("CSV preview:\n" + preview)
+            except OSError as exc:
+                lines.append(f"Could not read CSV: {exc}")
+
+        mon = self.session.monitor_interface
+        if mon:
+            _c, iw_out = self._helper.run_capture(["iw", "dev", mon, "info"])
+            lines.append((iw_out or "").strip() or f"No iw info for {mon}")
+            if "type monitor" not in (iw_out or "").lower():
+                lines.append("NOT in monitor mode — that explains empty scans.")
+
+        _c, check = self._helper.run_capture(["airmon-ng", "check"])
+        if re.search(r"NetworkManager|wpa_supplicant", check or "", re.I):
+            lines.append(
+                "NetworkManager/wpa_supplicant still running — they break scanning."
+            )
+
+        lines.append(
+            "Tip: stock rtl8xxxu on RTL8188EUS often fails monitor RX. "
+            "If iw shows monitor but CSV stays header-only, install aircrack-ng "
+            "rtl8188eus driver or try another adapter."
+        )
+        msg = "\n".join(lines)
+        self._emit(msg)
+        return msg
 
 
     def _discover_monitor_iface(self, preferred: Optional[str] = None) -> Optional[str]:
@@ -283,11 +359,10 @@ class AircrackService:
         csv_path = Path(f"{prefix}-01.csv")
         self.session.scan_csv_path = csv_path
 
-        # --band bg: 2.4 GHz only (RTL8188EUS); avoids odd CH14 hopping noise
+        # Full channel hop (2.4 + 5 if supported). Avoid --band filter — some
+        # rtl8xxxu builds mishandle it and return zero APs.
         cmd = [
             "airodump-ng",
-            "--band",
-            "bg",
             "--write-interval",
             "1",
             "-w",
