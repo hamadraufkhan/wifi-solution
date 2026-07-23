@@ -123,33 +123,32 @@ class DriverService:
         return hasattr(os, "geteuid") and os.geteuid() == 0
 
     def package_installed(self, name: str) -> bool:
-        code, _out = self._helper.run_capture(["dpkg", "-s", name], timeout=30)
+        code, _out = self._helper.run_capture(["dpkg", "-s", name], timeout=8)
         return code == 0
 
     def module_loaded(self, name: str) -> bool:
-        code, out = self._helper.run_capture(["lsmod"], timeout=15)
+        code, out = self._helper.run_capture(["lsmod"], timeout=8)
         if code != 0:
             return False
         return bool(re.search(rf"^{re.escape(name)}\b", out or "", re.M))
 
     def current_driver(self, iface: str) -> str:
-        # Prefer sysfs
         link = Path(f"/sys/class/net/{iface}/device/driver")
         try:
             if link.exists() or link.is_symlink():
                 return link.resolve().name
         except OSError:
             pass
-        code, out = self._helper.run_capture(["ethtool", "-i", iface], timeout=10)
+        code, out = self._helper.run_capture(["ethtool", "-i", iface], timeout=5)
         m = re.search(r"^driver:\s*(\S+)", out or "", re.M)
         return m.group(1) if m else ""
 
     def list_ifaces(self) -> list[str]:
-        code, out = self._helper.run_capture(["iw", "dev"], timeout=15)
+        code, out = self._helper.run_capture(["iw", "dev"], timeout=8)
         names = re.findall(r"Interface\s+(\S+)", out or "")
         if names:
             return sorted(set(names))
-        code, out = self._helper.run_capture(["iwconfig"], timeout=15)
+        code, out = self._helper.run_capture(["iwconfig"], timeout=8)
         return sorted(set(re.findall(r"^(\S+)\s+IEEE\s+802\.11", out or "", re.M)))
 
     def _match_profile(self, blob: str) -> Optional[DriverProfile]:
@@ -164,17 +163,22 @@ class DriverService:
         return None
 
     def verify(self) -> DriverReport:
+        """Fast verify — prefer iw/lsusb/sysfs; airmon-ng is optional (can hang)."""
         report = DriverReport(
             kernel=os.uname().release if hasattr(os, "uname") else "",
             is_root=self.is_root(),
         )
-        _c, report.lsusb = self._helper.run_capture(["lsusb"], timeout=20)
-        _c, report.airmon = self._helper.run_capture(["airmon-ng"], timeout=30)
+        self._emit("Collecting lsusb / iw (skipping slow airmon-ng probe)…")
+        _c, report.lsusb = self._helper.run_capture(["lsusb"], timeout=10)
+        # airmon-ng without args probes USB and often hangs — keep a short leash
+        _c, report.airmon = self._helper.run_capture(["airmon-ng"], timeout=12)
+        if _c == 124:
+            self._emit("airmon-ng timed out — continuing with iw/lsusb only")
+            report.airmon = report.airmon or "(airmon-ng timed out)"
 
         for pkg in {p.apt_package for p in PROFILES}:
             report.packages_installed[pkg] = self.package_installed(pkg)
 
-        # Build per-interface rows from airmon-ng when possible
         airmon_rows = self._parse_airmon_table(report.airmon)
         ifaces = self.list_ifaces()
         seen: set[str] = set()
@@ -202,7 +206,7 @@ class DriverService:
             if iface in seen:
                 continue
             driver = self.current_driver(iface)
-            blob = " ".join([iface, driver, report.lsusb])
+            blob = " ".join([iface, driver, report.lsusb, report.airmon])
             prof = self._match_profile(blob)
             info = AdapterInfo(
                 iface=iface,
@@ -214,7 +218,6 @@ class DriverService:
             self._evaluate(info)
             report.adapters.append(info)
 
-        # USB-only match (no iface yet / unplugged naming)
         if not report.adapters:
             prof = self._match_profile(report.lsusb + "\n" + report.airmon)
             if prof:
@@ -228,6 +231,7 @@ class DriverService:
                 self._evaluate(info)
                 report.adapters.append(info)
 
+        self._emit(f"Verify done — {len(report.adapters)} adapter(s)")
         return report
 
     def _evaluate(self, info: AdapterInfo) -> None:

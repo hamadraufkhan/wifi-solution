@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from typing import Optional
 
@@ -35,6 +36,7 @@ class ProcessRunner:
         on_done: Optional[OnDone] = None,
         env: Optional[dict[str, str]] = None,
         cwd: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> None:
         self.stop()
 
@@ -72,6 +74,18 @@ class ProcessRunner:
         self._thread = threading.Thread(target=_reader, daemon=True)
         self._thread.start()
 
+        if timeout is not None and timeout > 0:
+            def _watchdog() -> None:
+                time.sleep(timeout)
+                with self._lock:
+                    still = self._proc is proc and proc.poll() is None
+                if still:
+                    if on_line:
+                        on_line(f"(timeout after {timeout:.0f}s — stopping)")
+                    self.stop(force=True)
+
+            threading.Thread(target=_watchdog, daemon=True).start()
+
     def run_capture(
         self,
         cmd: list[str],
@@ -93,12 +107,23 @@ class ProcessRunner:
         except FileNotFoundError:
             return 127, f"Command not found: {cmd[0]}"
         except subprocess.TimeoutExpired as exc:
+            # Ensure child is dead (run() should kill, but be explicit)
+            try:
+                if exc.process is not None:
+                    exc.process.kill()
+                    exc.process.wait(timeout=3)
+            except Exception:
+                pass
             out = ""
             if exc.stdout:
-                out += exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode()
+                out += exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode(
+                    errors="replace"
+                )
             if exc.stderr:
-                out += exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode()
-            return 124, out or "Command timed out"
+                out += exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(
+                    errors="replace"
+                )
+            return 124, out or f"Command timed out after {timeout}s: {' '.join(cmd)}"
 
     def stop(self, *, force: bool = False) -> None:
         with self._lock:

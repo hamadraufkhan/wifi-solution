@@ -141,12 +141,17 @@ class CapturePage(PageBase):
             count = int(self.deauth_count.get().strip() or "5")
         except ValueError:
             count = 5
+        count = max(1, min(count, 10))
+        self.deauth_count.delete(0, "end")
+        self.deauth_count.insert(0, str(count))
         if not self.app.service.capturing:
             self.app.log("Start capture before sending deauth (recommended).")
         try:
             self.app.service.deauth(
                 count=count,
-                on_done=lambda code: self.app.log(f"Deauth finished ({code})"),
+                on_done=lambda code: self.app.log(
+                    f"Deauth finished ({code})"
+                ),
             )
         except Exception as exc:
             self.app.log(str(exc))

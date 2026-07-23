@@ -92,14 +92,32 @@ class DriversPage(PageBase):
             self.verify()
 
     def verify(self) -> None:
-        self.status.configure(text="Verifying…")
-        self.app.log("Verifying Wi-Fi adapters / drivers…")
-        try:
-            report = self.drivers.verify()
-        except Exception as exc:
-            self.app.log(f"Verify failed: {exc}")
-            self.status.configure(text=str(exc))
+        if getattr(self, "_verifying", False):
+            self.app.log("Verify already running…")
             return
+        self._verifying = True
+        self.status.configure(text="Verifying… (background)")
+        self.app.log("Verifying Wi-Fi adapters / drivers…")
+        self.btn_install.configure(state="disabled")
+
+        def _worker() -> None:
+            try:
+                report = self.drivers.verify()
+                self.ui(self._apply_report, report, None)
+            except Exception as exc:
+                self.ui(self._apply_report, None, str(exc))
+
+        import threading
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_report(self, report: Optional[DriverReport], error: Optional[str]) -> None:
+        self._verifying = False
+        if error:
+            self.app.log(f"Verify failed: {error}")
+            self.status.configure(text=error)
+            return
+        assert report is not None
         self._report = report
         self._fill_table(report)
         needs = [a for a in report.adapters if a.status == "needs_driver"]

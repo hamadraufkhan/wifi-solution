@@ -544,19 +544,32 @@ class AircrackService:
         if not mon or not ap:
             raise RuntimeError("Monitor interface and AP required for deauth")
 
+        # Clamp: 0 = continuous (hangs forever); high values flood the UI
+        count = max(1, min(int(count), 10))
+
         cmd = ["aireplay-ng", "-0", str(count), "-a", ap.bssid]
         if client and client.station_mac:
             cmd.extend(["-c", client.station_mac])
         cmd.append(mon)
 
         self._emit("Deauth: " + " ".join(cmd))
+        self._line_n = 0
 
         def _line(line: str) -> None:
-            self._emit(line)
-            if on_line:
-                on_line(line)
+            # Throttle spam — aireplay prints a line per burst of 64 frames
+            self._line_n += 1
+            n = self._line_n
+            if n <= 2 or n % 10 == 0 or "failed" in line.lower() or "error" in line.lower():
+                self._emit(line)
+                if on_line:
+                    on_line(line)
 
-        self._deauth_runner.start(cmd, on_line=_line, on_done=on_done)
+        def _done(code: int) -> None:
+            if on_done:
+                on_done(code)
+
+        # Hard stop so a stuck aireplay cannot freeze the session
+        self._deauth_runner.start(cmd, on_line=_line, on_done=_done, timeout=25.0)
 
     def probe_handshake(self, *, auto_stop: bool = True) -> bool:
         cap = self.session.capture_cap_path
