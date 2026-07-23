@@ -81,7 +81,7 @@ class ScanPage(PageBase):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x", pady=(8, 0))
-        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(1)).pack(
+        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(2)).pack(
             side="left"
         )
         ctk.CTkButton(nav, text="Select target →", width=140, command=self.goto_target).pack(
@@ -197,4 +197,4 @@ class ScanPage(PageBase):
             self.app.log("Select an AP from the table first.")
             return
         # Prefer stopped scan before capture, but allow continue
-        self.app.goto_step(3)
+        self.app.goto_step(4)

@@ -60,12 +60,13 @@ Wordlist crack:
 
 ## Workflow (GUI steps)
 
-1. **Interface** — list wireless NICs and select one  
-2. **Monitor** — kill interfering processes; start/stop monitor mode  
-3. **Scan** — discover APs (BSSID, channel, power, encryption, ESSID)  
-4. **Target** — pick an AP and an associated client  
-5. **Capture** — focused capture + optional deauth; wait for handshake  
-6. **Crack** — choose a wordlist and run `aircrack-ng`
+1. **Drivers** — verify chipset / install Kali DKMS drivers (e.g. RTL8188EUS)  
+2. **Interface** — list wireless NICs and select one  
+3. **Monitor** — kill interfering processes; start/stop monitor mode  
+4. **Scan** — discover APs (BSSID, channel, power, encryption, ESSID)  
+5. **Target** — pick an AP and an associated client  
+6. **Capture** — focused capture + optional deauth; wait for handshake  
+7. **Crack** — choose a wordlist and run `aircrack-ng`
 
 Captures are written under `captures/`.
 

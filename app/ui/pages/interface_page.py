@@ -96,4 +96,4 @@ class InterfacePage(PageBase):
             self.app.session.monitor_interface = name
         self.app.log(f"Selected interface: {name}")
         self.app.set_status(f"Interface: {name}")
-        self.app.goto_step(1)
+        self.app.goto_step(2)

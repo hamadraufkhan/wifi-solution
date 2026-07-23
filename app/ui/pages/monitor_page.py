@@ -54,7 +54,7 @@ class MonitorPage(PageBase):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x")
-        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(0)).pack(
+        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(1)).pack(
             side="left"
         )
         ctk.CTkButton(nav, text="Continue →", width=120, command=self.continue_next).pack(
@@ -79,7 +79,7 @@ class MonitorPage(PageBase):
         iface = self.app.session.interface
         if not iface:
             self.app.log("Select an interface first.")
-            self.app.goto_step(0)
+            self.app.goto_step(1)
             return
         if iface.endswith("mon"):
             self.app.session.monitor_interface = iface
@@ -113,4 +113,4 @@ class MonitorPage(PageBase):
         if not self.app.session.monitor_interface:
             self.app.log("Enable monitor mode before scanning.")
             return
-        self.app.goto_step(2)
+        self.app.goto_step(3)

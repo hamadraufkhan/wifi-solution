@@ -62,7 +62,7 @@ class TargetPage(PageBase):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x")
-        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(2)).pack(
+        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(3)).pack(
             side="left"
         )
         ctk.CTkButton(nav, text="Capture →", width=120, command=self.goto_capture).pack(
@@ -130,4 +130,4 @@ class TargetPage(PageBase):
         # Stop scan so channel lock works cleanly
         if self.app.service.scanning:
             self.app.service.stop_scan()
-        self.app.goto_step(4)
+        self.app.goto_step(5)

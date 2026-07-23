@@ -8,12 +8,14 @@ from app.core.aircrack_service import AircrackService
 from app.core.state import SessionState
 from app.ui.pages.capture_page import CapturePage
 from app.ui.pages.crack_page import CrackPage
+from app.ui.pages.drivers_page import DriversPage
 from app.ui.pages.interface_page import InterfacePage
 from app.ui.pages.monitor_page import MonitorPage
 from app.ui.pages.scan_page import ScanPage
 from app.ui.pages.target_page import TargetPage
 
 STEPS = [
+    "Drivers",
     "Interface",
     "Monitor",
     "Scan",
@@ -77,7 +79,7 @@ class MainWindow(ctk.CTk):
         self.tool_banner.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
         # Left nav
-        nav = ctk.CTkFrame(self, width=180, corner_radius=8)
+        nav = ctk.CTkFrame(self, width=190, corner_radius=8)
         nav.grid(row=1, column=0, sticky="nsw", padx=(12, 8), pady=12)
         nav.grid_propagate(False)
 
@@ -120,6 +122,7 @@ class MainWindow(ctk.CTk):
 
         # Instantiate pages
         page_classes = [
+            DriversPage,
             InterfacePage,
             MonitorPage,
             ScanPage,

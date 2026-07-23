@@ -73,7 +73,7 @@ class CrackPage(PageBase):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x", pady=(16, 0))
-        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(4)).pack(
+        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(5)).pack(
             side="left"
         )
 

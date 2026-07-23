@@ -72,7 +72,7 @@ class CapturePage(PageBase):
 
         nav = ctk.CTkFrame(self, fg_color="transparent")
         nav.pack(fill="x", pady=(16, 0))
-        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(3)).pack(
+        ctk.CTkButton(nav, text="← Back", width=100, command=lambda: app.goto_step(4)).pack(
             side="left"
         )
         self.btn_crack = ctk.CTkButton(
@@ -204,4 +204,4 @@ class CapturePage(PageBase):
             self.app.service.probe_handshake()
         if not self.app.session.handshake_ready:
             self.app.log("Warning: handshake not confirmed — cracking may fail.")
-        self.app.goto_step(5)
+        self.app.goto_step(6)
