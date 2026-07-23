@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import threading
 from collections.abc import Callable
@@ -15,24 +16,92 @@ from app.core.process_runner import ProcessRunner
 
 OnLine = Callable[[str], None]
 
+# USB vendor prefixes commonly used by Wi-Fi dongles
+WIFI_USB_VENDORS = (
+    "0bda:",  # Realtek
+    "2357:",  # TP-Link
+    "148f:",  # Ralink
+    "0cf3:",  # Atheros / Qualcomm
+    "0b05:",  # ASUS
+    "04bb:",  # I-O DATA
+    "2001:",  # D-Link
+    "0846:",  # Netgear
+    "13b1:",  # Linksys
+    "7392:",  # Edimax
+    "0e8d:",  # MediaTek
+    "045e:",  # Microsoft (some)
+)
+
+WIFI_USB_KEYWORDS = (
+    "wireless",
+    "802.11",
+    "wlan",
+    "wi-fi",
+    "wifi",
+    "realtek",
+    "ralink",
+    "atheros",
+    "mediatek",
+    "tp-link",
+    "rtl8",
+    "rtl81",
+    "rtl88",
+)
+
 
 @dataclass
 class DriverProfile:
-    """Known chipset → recommended Kali driver package."""
+    """Known chipset → recommended install path."""
 
     id: str
     label: str
-    usb_id_patterns: list[str]  # lowercase substrings matched in lsusb
-    chipset_keywords: list[str]  # matched in airmon/lsusb text
-    bad_modules: list[str]  # stock drivers that break monitor
-    good_module: str  # module name after install
-    apt_package: str
+    usb_id_patterns: list[str]
+    chipset_keywords: list[str]
+    bad_modules: list[str]
+    good_module: str
     blacklist_modules: list[str]
     notes: str = ""
+    # Install: apt package and/or git DKMS
+    apt_package: str = ""
+    install_method: str = "apt"  # apt | git_dkms
+    git_url: str = ""
+    dkms_name: str = ""
+    dkms_version: str = "1.0"
+
+    @property
+    def install_label(self) -> str:
+        if self.install_method == "git_dkms":
+            return f"git:{self.dkms_name or self.id}"
+        return self.apt_package or "(manual)"
 
 
 # Profiles ordered by specificity (first match wins)
 PROFILES: list[DriverProfile] = [
+    DriverProfile(
+        id="rtl8192eu",
+        label="Realtek RTL8192EU (TP-Link TL-WN823N v2/v3, …)",
+        usb_id_patterns=[
+            "2357:0109",  # TL-WN823N v2/v3
+            "2357:0108",
+            "2357:0126",
+            "0bda:818b",
+            "0bda:818c",
+            "2001:3319",
+            "0bda:8178",
+        ],
+        chipset_keywords=["rtl8192eu", "8192eu", "tl-wn823n", "wn823n"],
+        bad_modules=["rtl8xxxu"],
+        good_module="8192eu",
+        blacklist_modules=["rtl8xxxu"],
+        install_method="git_dkms",
+        git_url="https://github.com/clnhub/rtl8192eu-linux.git",
+        dkms_name="rtl8192eu",
+        dkms_version="1.0",
+        notes=(
+            "No Kali apt DKMS for this chip. Install builds 8192eu via DKMS from GitHub "
+            "and blacklists rtl8xxxu. Unplug/replug after install."
+        ),
+    ),
     DriverProfile(
         id="rtl8188eus",
         label="Realtek RTL8188EUS / 8188EU (monitor + injection)",
@@ -91,6 +160,7 @@ class AdapterInfo:
     profile: Optional[DriverProfile] = None
     status: str = "unknown"  # ok | needs_driver | unknown
     detail: str = ""
+    source: str = ""  # usb | iface | airmon
 
 
 @dataclass
@@ -105,6 +175,7 @@ class DriverReport:
 
 class DriverService:
     BLACKLIST_PATH = Path("/etc/modprobe.d/wifi-solution-realtek.conf")
+    BUILD_DIR = Path("/tmp/wifi-solution-drivers")
 
     def __init__(self, *, log: Optional[OnLine] = None) -> None:
         self.log = log or (lambda _m: None)
@@ -123,6 +194,8 @@ class DriverService:
         return hasattr(os, "geteuid") and os.geteuid() == 0
 
     def package_installed(self, name: str) -> bool:
+        if not name:
+            return False
         code, _out = self._helper.run_capture(["dpkg", "-s", name], timeout=8)
         return code == 0
 
@@ -131,6 +204,19 @@ class DriverService:
         if code != 0:
             return False
         return bool(re.search(rf"^{re.escape(name)}\b", out or "", re.M))
+
+    def dkms_installed(self, name: str, version: str = "1.0") -> bool:
+        code, out = self._helper.run_capture(["dkms", "status"], timeout=15)
+        if code != 0:
+            return False
+        # rtl8192eu, 1.0, ...: installed
+        return bool(
+            re.search(
+                rf"{re.escape(name)}\s*,\s*{re.escape(version)}.*installed",
+                out or "",
+                re.I,
+            )
+        )
 
     def current_driver(self, iface: str) -> str:
         link = Path(f"/sys/class/net/{iface}/device/driver")
@@ -162,51 +248,121 @@ class DriverService:
                     return prof
         return None
 
+    @staticmethod
+    def _parse_usb_id(line: str) -> str:
+        m = re.search(r"ID\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})", line)
+        return m.group(1).lower() if m else ""
+
+    def parse_wireless_usb_devices(self, lsusb: str) -> list[dict[str, str]]:
+        """Return every likely Wi-Fi USB device from lsusb (generic)."""
+        found: list[dict[str, str]] = []
+        for line in (lsusb or "").splitlines():
+            low = line.lower()
+            vid = any(v in low for v in WIFI_USB_VENDORS)
+            kw = any(k in low for k in WIFI_USB_KEYWORDS)
+            # Skip hubs / virtualbox tablet noise unless keyword matches strongly
+            if "root hub" in low or "virtualbox" in low:
+                continue
+            if not (vid or kw):
+                continue
+            # Vendor-only without wireless keyword: still keep Realtek/TP-Link/Ralink NICs
+            if vid and not kw:
+                # Keep known Wi-Fi vendors even if description is sparse
+                if not any(
+                    v in low
+                    for v in ("0bda:", "2357:", "148f:", "0cf3:", "2001:", "0e8d:")
+                ):
+                    continue
+            usb_id = self._parse_usb_id(line)
+            found.append({"usb": line.strip(), "usb_ids": usb_id, "desc": line.strip()})
+        return found
+
     def verify(self) -> DriverReport:
-        """Fast verify — prefer iw/lsusb/sysfs; airmon-ng is optional (can hang)."""
+        """List all wireless USB + ifaces; recommend drivers when known."""
         report = DriverReport(
             kernel=os.uname().release if hasattr(os, "uname") else "",
             is_root=self.is_root(),
         )
-        self._emit("Collecting lsusb / iw (skipping slow airmon-ng probe)…")
+        self._emit("Scanning USB Wi-Fi devices and wireless interfaces…")
         _c, report.lsusb = self._helper.run_capture(["lsusb"], timeout=10)
-        # airmon-ng without args probes USB and often hangs — keep a short leash
         _c, report.airmon = self._helper.run_capture(["airmon-ng"], timeout=12)
         if _c == 124:
-            self._emit("airmon-ng timed out — continuing with iw/lsusb only")
+            self._emit("airmon-ng timed out — continuing with lsusb/iw")
             report.airmon = report.airmon or "(airmon-ng timed out)"
 
-        for pkg in {p.apt_package for p in PROFILES}:
+        for pkg in {p.apt_package for p in PROFILES if p.apt_package}:
             report.packages_installed[pkg] = self.package_installed(pkg)
 
+        usb_devs = self.parse_wireless_usb_devices(report.lsusb)
         airmon_rows = self._parse_airmon_table(report.airmon)
         ifaces = self.list_ifaces()
-        seen: set[str] = set()
 
-        for row in airmon_rows:
-            iface = row.get("iface", "")
-            if not iface:
-                continue
-            seen.add(iface)
-            chipset = row.get("chipset", "")
-            driver = row.get("driver") or self.current_driver(iface)
-            blob = " ".join([chipset, driver, report.lsusb, report.airmon])
+        # Index ifaces by driver for later merge
+        iface_driver = {iface: self.current_driver(iface) for iface in ifaces}
+
+        # 1) Always show every wireless USB device
+        used_usb_ids: set[str] = set()
+        for dev in usb_devs:
+            usb_id = dev["usb_ids"]
+            used_usb_ids.add(usb_id)
+            blob = " ".join([dev["usb"], report.airmon, " ".join(ifaces)])
             prof = self._match_profile(blob)
+            # Try to pair with an iface that shares this driver/chip family
+            paired_iface = ""
+            paired_driver = ""
+            for iface, drv in iface_driver.items():
+                if prof and drv.lower() in (
+                    [m.lower() for m in prof.bad_modules]
+                    + [prof.good_module.lower(), "rtl8xxxu"]
+                ):
+                    paired_iface = iface
+                    paired_driver = drv
+                    break
+            if not paired_iface and len(ifaces) == 1:
+                paired_iface = ifaces[0]
+                paired_driver = iface_driver.get(paired_iface, "")
+
             info = AdapterInfo(
-                iface=iface,
-                driver=driver,
-                chipset=chipset,
-                usb=self._guess_usb_line(chipset, report.lsusb),
+                iface=paired_iface or "(no iface yet)",
+                driver=paired_driver or "",
+                chipset=(prof.label if prof else self._chipset_from_usb(dev["usb"])),
+                usb=dev["usb"],
+                usb_ids=usb_id,
                 profile=prof,
+                source="usb",
             )
             self._evaluate(info)
             report.adapters.append(info)
 
-        for iface in ifaces:
-            if iface in seen:
+        # 2) Airmon rows not already covered
+        seen_ifaces = {a.iface for a in report.adapters if a.iface and not a.iface.startswith("(")}
+        for row in airmon_rows:
+            iface = row.get("iface", "")
+            if not iface or iface in seen_ifaces:
                 continue
-            driver = self.current_driver(iface)
-            blob = " ".join([iface, driver, report.lsusb, report.airmon])
+            seen_ifaces.add(iface)
+            chipset = row.get("chipset", "")
+            driver = row.get("driver") or iface_driver.get(iface, "")
+            blob = " ".join([chipset, driver, report.lsusb])
+            prof = self._match_profile(blob)
+            info = AdapterInfo(
+                iface=iface,
+                driver=driver,
+                chipset=chipset or (prof.label if prof else ""),
+                usb=self._guess_usb_line(chipset or driver, report.lsusb),
+                usb_ids=self._parse_usb_id(self._guess_usb_line(chipset or driver, report.lsusb)),
+                profile=prof,
+                source="airmon",
+            )
+            self._evaluate(info)
+            report.adapters.append(info)
+
+        # 3) Remaining iw ifaces
+        for iface in ifaces:
+            if iface in seen_ifaces:
+                continue
+            driver = iface_driver.get(iface, "")
+            blob = " ".join([iface, driver, report.lsusb])
             prof = self._match_profile(blob)
             info = AdapterInfo(
                 iface=iface,
@@ -214,57 +370,71 @@ class DriverService:
                 chipset=prof.label if prof else "",
                 usb=self._guess_usb_line(driver, report.lsusb),
                 profile=prof,
+                source="iface",
             )
             self._evaluate(info)
             report.adapters.append(info)
 
-        if not report.adapters:
-            prof = self._match_profile(report.lsusb + "\n" + report.airmon)
-            if prof:
-                info = AdapterInfo(
-                    iface="(none up)",
-                    driver="",
-                    chipset=prof.label,
-                    usb=self._guess_usb_line(prof.label, report.lsusb),
-                    profile=prof,
-                )
-                self._evaluate(info)
-                report.adapters.append(info)
-
-        self._emit(f"Verify done — {len(report.adapters)} adapter(s)")
+        self._emit(f"Verify done — {len(report.adapters)} device(s)")
         return report
+
+    @staticmethod
+    def _chipset_from_usb(usb_line: str) -> str:
+        # "Bus … ID 2357:0109 TP-Link TL-WN823N v2/v3 [Realtek RTL8192EU]"
+        m = re.search(r"ID\s+[0-9a-fA-F:]+\s+(.+)$", usb_line)
+        return (m.group(1).strip() if m else usb_line)[:80]
 
     def _evaluate(self, info: AdapterInfo) -> None:
         prof = info.profile
         if not prof:
             info.status = "unknown"
             info.detail = (
-                "No known package mapping. If scanning fails, use an Atheros/"
-                "Ralink or Realtek AU adapter with Kali DKMS drivers."
+                "USB Wi-Fi detected, but no automatic driver recipe for this ID yet. "
+                "You can still use Interface/Monitor if the kernel driver works. "
+                "For Realtek sticks that scan 0 APs, a dedicated DKMS driver is usually required."
             )
             return
 
-        pkg_ok = self.package_installed(prof.apt_package)
         good_loaded = self.module_loaded(prof.good_module) or (
             info.driver.lower() == prof.good_module.lower()
         )
         bad_loaded = info.driver.lower() in [m.lower() for m in prof.bad_modules]
 
+        if prof.install_method == "git_dkms":
+            dkms_ok = self.dkms_installed(prof.dkms_name or prof.id, prof.dkms_version)
+            if good_loaded and not bad_loaded:
+                info.status = "ok"
+                info.detail = (
+                    f"Using {info.driver or prof.good_module} — looks good for monitor/injection."
+                )
+            elif bad_loaded or not good_loaded:
+                info.status = "needs_driver"
+                info.detail = (
+                    f"Current driver '{info.driver or 'none'}' is not ideal. "
+                    f"Install {prof.install_label} (module {prof.good_module}). "
+                    f"DKMS installed={dkms_ok}. {prof.notes}"
+                )
+            else:
+                info.status = "ok"
+                info.detail = "Profile matched; driver appears usable."
+            return
+
+        pkg_ok = self.package_installed(prof.apt_package)
         if good_loaded and not bad_loaded and pkg_ok:
             info.status = "ok"
-            info.detail = f"Using {info.driver or prof.good_module} — looks good for monitor/injection."
-        elif bad_loaded or (prof.bad_modules and info.driver.lower() in [m.lower() for m in prof.bad_modules]):
+            info.detail = (
+                f"Using {info.driver or prof.good_module} — looks good for monitor/injection."
+            )
+        elif bad_loaded:
             info.status = "needs_driver"
             info.detail = (
                 f"Driver '{info.driver}' is known-bad for this chipset. "
-                f"Install {prof.apt_package} (module {prof.good_module}). "
-                f"{prof.notes}"
+                f"Install {prof.apt_package} (module {prof.good_module}). {prof.notes}"
             )
         elif not pkg_ok:
             info.status = "needs_driver"
             info.detail = (
-                f"Recommended package not installed: {prof.apt_package}. "
-                f"{prof.notes}"
+                f"Recommended package not installed: {prof.apt_package}. {prof.notes}"
             )
         elif not good_loaded:
             info.status = "needs_driver"
@@ -279,7 +449,6 @@ class DriverService:
     def _parse_airmon_table(self, text: str) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         for line in (text or "").splitlines():
-            # phy0  wlan0  rtl8xxxu  Realtek ...
             parts = re.split(r"\t+|\s{2,}", line.strip())
             if len(parts) < 3:
                 continue
@@ -290,7 +459,7 @@ class DriverService:
                     "phy": parts[0],
                     "iface": parts[1] if len(parts) > 1 else "",
                     "driver": parts[2] if len(parts) > 2 else "",
-                    "chipset": parts[3] if len(parts) > 3 else " ".join(parts[3:]),
+                    "chipset": " ".join(parts[3:]) if len(parts) > 3 else "",
                 }
             )
         return rows
@@ -299,11 +468,13 @@ class DriverService:
         low_hint = (hint or "").lower()
         for line in (lsusb or "").splitlines():
             low = line.lower()
-            if "wireless" in low or "802.11" in low or "wlan" in low or "realtek" in low:
-                if not hint or any(x in low for x in low_hint.split()[:2] if len(x) > 3):
+            if any(k in low for k in WIFI_USB_KEYWORDS) or any(
+                v in low for v in WIFI_USB_VENDORS
+            ):
+                if not hint or any(x in low for x in low_hint.split()[:3] if len(x) > 3):
                     return line.strip()
         for line in (lsusb or "").splitlines():
-            if "0bda:" in line.lower() or "2357:" in line.lower():
+            if any(v in line.lower() for v in ("0bda:", "2357:", "148f:", "0cf3:")):
                 return line.strip()
         return ""
 
@@ -333,6 +504,24 @@ class DriverService:
         code, out = self._helper.run_capture(["modprobe", profile.good_module], timeout=30)
         self._emit((out or "").strip() or f"modprobe exit {code}")
 
+    def _run_logged(
+        self,
+        cmd: list[str],
+        *,
+        on_line: Optional[OnLine],
+        cwd: Optional[str] = None,
+    ) -> int:
+        self._emit("Running: " + " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        for line in out.splitlines():
+            msg = line.rstrip()
+            if msg:
+                self._emit(msg)
+                if on_line:
+                    on_line(msg)
+        return proc.returncode
+
     def install_profile(
         self,
         profile: DriverProfile,
@@ -350,49 +539,21 @@ class DriverService:
             return
 
         self._installing = True
-        kernel = os.uname().release
 
         def _run() -> None:
             code = 1
             try:
-                cmds = [
-                    ["apt-get", "update"],
-                    [
-                        "apt-get",
-                        "install",
-                        "-y",
-                        "dkms",
-                        "build-essential",
-                        f"linux-headers-{kernel}",
-                        profile.apt_package,
-                    ],
-                ]
-                for cmd in cmds:
-                    self._emit("Running: " + " ".join(cmd))
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                    )
-                    out = (proc.stdout or "") + (proc.stderr or "")
-                    for line in out.splitlines():
-                        msg = line.rstrip()
-                        if msg:
-                            self._emit(msg)
-                            if on_line:
-                                on_line(msg)
-                    code = proc.returncode
-                    if code != 0:
-                        self._emit(f"Command failed ({code}): {' '.join(cmd)}")
-                        break
+                if profile.install_method == "git_dkms":
+                    code = self._install_git_dkms(profile, on_line=on_line)
                 else:
+                    code = self._install_apt(profile, on_line=on_line)
+                if code == 0:
                     self.ensure_blacklist(profile.blacklist_modules)
                     self.reload_modules(profile)
                     self._emit(
-                        f"Installed {profile.apt_package}. "
-                        "Unplug/replug the adapter (or reboot) then Verify again."
+                        f"Install finished ({profile.install_label}). "
+                        "Unplug/replug the adapter (or reboot), then Verify again."
                     )
-                    code = 0
             except Exception as exc:
                 self._emit(f"Install error: {exc}")
                 code = 1
@@ -402,6 +563,94 @@ class DriverService:
                     on_done(code)
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _install_apt(
+        self, profile: DriverProfile, *, on_line: Optional[OnLine]
+    ) -> int:
+        kernel = os.uname().release
+        cmds = [
+            ["apt-get", "update"],
+            [
+                "apt-get",
+                "install",
+                "-y",
+                "dkms",
+                "build-essential",
+                f"linux-headers-{kernel}",
+                profile.apt_package,
+            ],
+        ]
+        for cmd in cmds:
+            code = self._run_logged(cmd, on_line=on_line)
+            if code != 0:
+                self._emit(f"Command failed ({code}): {' '.join(cmd)}")
+                return code
+        return 0
+
+    def _install_git_dkms(
+        self, profile: DriverProfile, *, on_line: Optional[OnLine]
+    ) -> int:
+        kernel = os.uname().release
+        name = profile.dkms_name or profile.id
+        ver = profile.dkms_version or "1.0"
+        src = self.BUILD_DIR / name
+
+        prep = [
+            ["apt-get", "update"],
+            [
+                "apt-get",
+                "install",
+                "-y",
+                "dkms",
+                "build-essential",
+                "git",
+                f"linux-headers-{kernel}",
+            ],
+        ]
+        for cmd in prep:
+            code = self._run_logged(cmd, on_line=on_line)
+            if code != 0:
+                self._emit(f"Command failed ({code}): {' '.join(cmd)}")
+                return code
+
+        self.BUILD_DIR.mkdir(parents=True, exist_ok=True)
+        if src.exists():
+            shutil.rmtree(src, ignore_errors=True)
+
+        code = self._run_logged(
+            ["git", "clone", "--depth", "1", profile.git_url, str(src)],
+            on_line=on_line,
+        )
+        if code != 0:
+            return code
+
+        # Prefer upstream install script when present
+        for script in ("install_wifi.sh", "dkms-install.sh", "install.sh"):
+            path = src / script
+            if path.exists():
+                path.chmod(path.stat().st_mode | 0o111)
+                code = self._run_logged(["bash", str(path)], on_line=on_line, cwd=str(src))
+                if code == 0:
+                    return 0
+                self._emit(f"{script} failed ({code}); trying manual dkms…")
+
+        # Manual DKMS
+        self._run_logged(
+            ["dkms", "remove", f"{name}/{ver}", "--all"],
+            on_line=on_line,
+        )
+        dest = Path(f"/usr/src/{name}-{ver}")
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(src, dest)
+        for cmd in (
+            ["dkms", "add", "-m", name, "-v", ver],
+            ["dkms", "install", "-m", name, "-v", ver],
+        ):
+            code = self._run_logged(cmd, on_line=on_line)
+            if code != 0:
+                return code
+        return 0
 
     def profiles_for_report(self, report: DriverReport) -> list[DriverProfile]:
         found: list[DriverProfile] = []

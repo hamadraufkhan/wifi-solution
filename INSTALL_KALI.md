@@ -112,8 +112,9 @@ See [README.md](README.md#screenshots) or `docs/screenshots/`:
 | `externally-managed-environment` | Use `./setup.sh` / a venv — do not use system `pip3` |
 | `Missing dependency: customtkinter` | You ran system `python3`. Use `sudo .venv/bin/python main.py` or `./run.sh` |
 | `customtkinter` import error after setup | Re-run `./setup.sh` |
-| Scan shows **0 APs** (RTL8188EUS / rtl8xxxu) | Open **Drivers** step → Verify → Install `realtek-rtl8188eus-dkms` → Blacklist + reload → unplug/replug USB → Scan again |
-| Driver install | GUI Drivers step installs Kali packages (`realtek-rtl8188eus-dkms`, `realtek-rtl88xxau-dkms`, …) and blacklists stock modules |
+| Driver install | GUI **Drivers** step lists all wireless USBs. Known chips: apt DKMS (`realtek-rtl8188eus-dkms`, `realtek-rtl88xxau-dkms`) or git DKMS (`rtl8192eu` for TL-WN823N / 2357:0109) |
+| Scan shows **0 APs** (RTL8188EUS / rtl8xxxu) | Open **Drivers** → Verify → Install recommended → Blacklist + reload → unplug/replug USB → Scan again |
+| TL-WN823N (RTL8192EU) | Drivers → should show `2357:0109` → Install recommended (builds `8192eu` via DKMS) → replug |
 | No wireless interfaces listed | Plug in a USB Wi-Fi adapter; check `iwconfig` / `ip link` |
 | Monitor mode fails | Use **Check kill** on the Monitor step; try another adapter/driver |
 | GUI does not open | `sudo apt install -y python3-tk` |

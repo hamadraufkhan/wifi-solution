@@ -28,9 +28,9 @@ class DriversPage(PageBase):
         ctk.CTkLabel(
             self,
             text=(
-                "Verify the USB adapter driver before scanning. "
-                "RTL8188EUS on stock rtl8xxxu often sees 0 networks — "
-                "install Kali’s realtek-rtl8188eus-dkms package instead."
+                "Lists every wireless USB adapter (any brand). "
+                "Known chipsets get a one-click install (apt DKMS or git DKMS). "
+                "Your TL-WN823N (RTL8192EU) needs the 8192eu DKMS driver."
             ),
             text_color="gray70",
             wraplength=640,
@@ -67,13 +67,14 @@ class DriversPage(PageBase):
         self.tree = make_treeview(
             table_frame,
             [
-                ("iface", "Iface", 80),
-                ("driver", "Driver", 100),
-                ("chipset", "Chipset", 220),
+                ("usb_ids", "USB ID", 100),
+                ("iface", "Iface", 90),
+                ("driver", "Driver", 90),
+                ("chipset", "Device / chipset", 220),
                 ("status", "Status", 100),
-                ("package", "Package", 180),
+                ("package", "Install", 140),
             ],
-            height=6,
+            height=7,
         )
         pack_tree_with_scroll(self.tree, table_frame)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
@@ -153,14 +154,15 @@ class DriversPage(PageBase):
         for item in self.tree.get_children():
             self.tree.delete(item)
         for ad in report.adapters:
-            pkg = ad.profile.apt_package if ad.profile else "—"
+            pkg = ad.profile.install_label if ad.profile else "—"
             self.tree.insert(
                 "",
                 "end",
                 values=(
-                    ad.iface,
+                    ad.usb_ids or "—",
+                    ad.iface or "—",
                     ad.driver or "—",
-                    (ad.chipset or "—")[:40],
+                    (ad.chipset or "—")[:48],
                     ad.status,
                     pkg,
                 ),
@@ -178,21 +180,29 @@ class DriversPage(PageBase):
         if not sel or not self._report:
             return
         vals = self.tree.item(sel[0], "values")
-        iface = vals[0]
+        usb_id = vals[0]
+        iface = vals[1]
         ad: Optional[AdapterInfo] = None
         for a in self._report.adapters:
-            if a.iface == iface:
+            if (a.usb_ids or "—") == usb_id and (a.iface or "—") == iface:
                 ad = a
                 break
+        if not ad and self._report.adapters:
+            # fallback: match usb id only
+            for a in self._report.adapters:
+                if (a.usb_ids or "—") == usb_id:
+                    ad = a
+                    break
         if not ad:
             return
         self._selected_profile = ad.profile
         self.detail.delete("1.0", "end")
         lines = [
+            f"USB: {ad.usb or '—'}",
+            f"USB ID: {ad.usb_ids or '—'}",
             f"Interface: {ad.iface}",
             f"Driver: {ad.driver or '—'}",
             f"Chipset: {ad.chipset or '—'}",
-            f"USB: {ad.usb or '—'}",
             f"Status: {ad.status}",
             "",
             ad.detail,
@@ -200,10 +210,12 @@ class DriversPage(PageBase):
         if ad.profile:
             lines += [
                 "",
-                f"Recommended package: {ad.profile.apt_package}",
+                f"Install: {ad.profile.install_label}",
                 f"Module: {ad.profile.good_module}",
                 f"Blacklist: {', '.join(ad.profile.blacklist_modules) or '(none)'}",
             ]
+            if ad.profile.git_url:
+                lines.append(f"Source: {ad.profile.git_url}")
             self.btn_install.configure(state="normal")
         else:
             self.btn_install.configure(state="disabled")
