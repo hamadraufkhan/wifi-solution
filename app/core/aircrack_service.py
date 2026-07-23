@@ -163,37 +163,63 @@ class AircrackService:
         if not mon and parsers.AIRMON_ENABLED_BARE_RE.search(out or ""):
             mon = interface
 
+        # airmon often prints "monitor mode enabled" for Realtek even when the
+        # iface is still Managed — only trust real Mode:Monitor / type monitor.
+        if mon and not self._discover_monitor_iface(preferred=mon):
+            self._emit(
+                "airmon-ng claimed monitor, but iwconfig still shows Managed — "
+                "trying driver-specific enable…"
+            )
+            ok_set, set_out = self._enable_monitor(mon)
+            out = (out or "") + "\n" + set_out
+            if not ok_set:
+                mon = None
+
         if not mon:
             mon = self._discover_monitor_iface(preferred=interface)
 
-        # airmon may claim success while iface is still managed (rtl8192eu) —
-        # force the correct API for this driver.
-        target = mon or interface
-        if not self._discover_monitor_iface(preferred=target):
+        if not mon:
             self._emit(
-                f"Confirming monitor on {target} "
-                f"(driver={self._iface_driver(target) or 'unknown'})…"
+                f"Trying monitor enable on {interface} "
+                f"(driver={self._iface_driver(interface) or 'unknown'})…"
             )
-            ok_set, set_out = self._enable_monitor(target)
+            ok_set, set_out = self._enable_monitor(interface)
             out = (out or "") + "\n" + set_out
             if ok_set:
-                mon = target
+                mon = interface
 
-        if not mon:
-            mon = self._discover_monitor_iface(preferred=interface)
-
-        if mon:
+        if mon and self._discover_monitor_iface(preferred=mon):
             self._helper.run_capture(["ip", "link", "set", mon, "up"])
             self.session.interface = interface
             self.session.monitor_interface = mon
             self._emit(f"Monitor interface: {mon}")
             self._log_iface_diag(mon)
-            if not self._discover_monitor_iface(preferred=mon):
-                self._emit(
-                    "WARNING: monitor may not have stuck — check iwconfig Mode:Monitor"
-                )
+            self._warn_virtualbox_if_needed()
             return True, out, mon
-        return False, out or "Could not determine monitor interface", None
+
+        self._warn_virtualbox_if_needed()
+        self._emit(
+            "Monitor mode FAILED. For RTL8192EU: reinstall driver from Drivers "
+            "(must have CONFIG_WIFI_MONITOR=y). If you are in VirtualBox, "
+            "txpower -100 / Invalid argument is common — use bare-metal Kali "
+            "or a different USB adapter (e.g. Atheros AR9271)."
+        )
+        return False, out or "Monitor mode not active", None
+
+    def _warn_virtualbox_if_needed(self) -> None:
+        code, out = self._helper.run_capture(["systemd-detect-virt"], timeout=5)
+        virt = (out or "").strip().lower()
+        if code == 0 and virt and virt not in ("none", ""):
+            self._emit(
+                f"NOTE: running inside '{virt}'. USB Wi-Fi monitor mode is often "
+                "broken in VMs (especially Realtek). Prefer bare metal."
+            )
+            return
+        _c, lsusb = self._helper.run_capture(["lsusb"], timeout=8)
+        if re.search(r"VirtualBox|VMware|QEMU", lsusb or "", re.I):
+            self._emit(
+                "NOTE: VirtualBox/VMware USB device detected — monitor mode may fail."
+            )
 
     def prepare_for_scan(self) -> None:
         """Check-kill + ensure monitor before airodump (iw OR iwconfig)."""
@@ -205,33 +231,23 @@ class AircrackService:
         target = iface or mon
         assert target is not None
 
-        self._emit("Preparing interface for scan (check kill + monitor reset)…")
+        self._emit("Preparing interface for scan (check kill + ensure monitor)…")
         self.check_kill()
         self._helper.run_capture(["rfkill", "unblock", "all"])
 
         still = self._discover_monitor_iface(preferred=target)
         if not still:
-            ok_set, set_out = self._enable_monitor(target)
-            self._emit(set_out)
-            if not ok_set:
-                ok, _out, new_mon = self.start_monitor(
-                    target, auto_check_kill=False, force_reset=True
-                )
-                if not ok or not new_mon:
-                    raise RuntimeError(
-                        "Could not enable monitor mode. "
-                        "For RTL8192EU use iwconfig Mode:Monitor (not iw). "
-                        "Replug the adapter and try Start monitor again."
-                    )
-                target = new_mon
-            still = self._discover_monitor_iface(preferred=target)
-
-        if not still:
-            raise RuntimeError(
-                f"{target} is not in monitor mode after reset. "
-                "Check Drivers step / 8192eu module, then: "
-                "ifconfig wlan0 down; iwconfig wlan0 mode monitor; ifconfig wlan0 up"
+            ok, _out, new_mon = self.start_monitor(
+                target, auto_check_kill=False, force_reset=True
             )
+            if not ok or not new_mon:
+                self._warn_virtualbox_if_needed()
+                raise RuntimeError(
+                    "Could not enable monitor mode. "
+                    "Drivers → Install again (8192eu needs CONFIG_WIFI_MONITOR=y). "
+                    "Avoid VirtualBox for this adapter if possible."
+                )
+            still = new_mon
 
         self._helper.run_capture(["ip", "link", "set", still, "up"])
         self.session.monitor_interface = still
@@ -343,28 +359,39 @@ class AircrackService:
     def _enable_monitor_via_iwconfig(self, interface: str) -> tuple[bool, str]:
         """Legacy Realtek (8192eu/8188eu): iwconfig mode monitor."""
         logs: list[str] = []
-        for cmd in (
-            ["ip", "link", "set", interface, "down"],
-            ["iwconfig", interface, "mode", "monitor"],
-            ["ip", "link", "set", interface, "up"],
-        ):
-            self._emit("Running: " + " ".join(cmd))
-            code, out = self._helper.run_capture(cmd)
-            chunk = out.strip() or f"(exit {code})"
-            logs.append(" ".join(cmd) + " -> " + chunk)
-            self._emit(chunk)
-            if code != 0 and "mode" in cmd:
-                return False, "\n".join(logs)
 
-        mon = self._discover_monitor_iface(preferred=interface)
-        if mon:
-            return True, "\n".join(logs)
-        # Some 8192eu builds only show via iwconfig after a moment
-        time.sleep(0.5)
-        _c, iwc = self._helper.run_capture(["iwconfig", interface])
-        if parsers.iface_is_monitor(iwc, interface):
-            return True, "\n".join(logs)
-        return False, "\n".join(logs) + "\nMonitor mode not confirmed after iwconfig"
+        # Try common orderings — some builds reject mode while down/up differently
+        sequences = [
+            [
+                ["ip", "link", "set", interface, "down"],
+                ["iwconfig", interface, "mode", "monitor"],
+                ["ip", "link", "set", interface, "up"],
+            ],
+            [
+                ["ip", "link", "set", interface, "up"],
+                ["iwconfig", interface, "mode", "monitor"],
+            ],
+        ]
+        for cmds in sequences:
+            for cmd in cmds:
+                self._emit("Running: " + " ".join(cmd))
+                code, out = self._helper.run_capture(cmd)
+                chunk = out.strip() or f"(exit {code})"
+                logs.append(" ".join(cmd) + " -> " + chunk)
+                self._emit(chunk)
+            time.sleep(0.4)
+            if self._discover_monitor_iface(preferred=interface):
+                return True, "\n".join(logs)
+            _c, iwc = self._helper.run_capture(["iwconfig", interface])
+            if parsers.iface_is_monitor(iwc, interface):
+                return True, "\n".join(logs)
+
+        tip = (
+            "\nMonitor mode not supported by this 8192eu build "
+            "(CONFIG_WIFI_MONITOR was likely n). "
+            "Drivers → Install recommended again (rebuilds with monitor=y)."
+        )
+        return False, "\n".join(logs) + tip
 
     def _enable_monitor_via_iw(self, interface: str) -> tuple[bool, str]:
         """Set type monitor with iw (mac80211 drivers only)."""

@@ -94,12 +94,14 @@ PROFILES: list[DriverProfile] = [
         good_module="8192eu",
         blacklist_modules=["rtl8xxxu"],
         install_method="git_dkms",
-        git_url="https://github.com/clnhub/rtl8192eu-linux.git",
+        # Mange fork ships CONFIG_WIFI_MONITOR=y (clnhub defaults to n → iwconfig fails)
+        git_url="https://github.com/Mange/rtl8192eu-linux-driver.git",
         dkms_name="rtl8192eu",
         dkms_version="1.0",
         notes=(
-            "No Kali apt DKMS for this chip. Install builds 8192eu via DKMS from GitHub "
-            "and blacklists rtl8xxxu. Unplug/replug after install."
+            "Must be built with CONFIG_WIFI_MONITOR=y. Re-run Install if "
+            "iwconfig mode monitor returns Invalid argument. "
+            "VirtualBox USB passthrough often breaks this stick (txpower -100)."
         ),
     ),
     DriverProfile(
@@ -624,8 +626,11 @@ class DriverService:
         if code != 0:
             return code
 
+        # Realtek out-of-tree drivers often ship with monitor disabled
+        self._enable_wifi_monitor_flag(src)
+
         # Prefer upstream install script when present
-        for script in ("install_wifi.sh", "dkms-install.sh", "install.sh"):
+        for script in ("install.sh", "dkms-install.sh", "install_wifi.sh"):
             path = src / script
             if path.exists():
                 path.chmod(path.stat().st_mode | 0o111)
@@ -651,6 +656,29 @@ class DriverService:
             if code != 0:
                 return code
         return 0
+
+    def _enable_wifi_monitor_flag(self, src: Path) -> None:
+        """Force CONFIG_WIFI_MONITOR=y so iwconfig mode monitor works."""
+        patched = 0
+        for makefile in src.rglob("Makefile"):
+            try:
+                text = makefile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "CONFIG_WIFI_MONITOR" not in text:
+                continue
+            new = re.sub(
+                r"^(CONFIG_WIFI_MONITOR\s*=\s*)n\s*$",
+                r"\1y",
+                text,
+                flags=re.MULTILINE,
+            )
+            if new != text:
+                makefile.write_text(new, encoding="utf-8")
+                self._emit(f"Patched CONFIG_WIFI_MONITOR=y in {makefile}")
+                patched += 1
+        if patched == 0:
+            self._emit("Note: no CONFIG_WIFI_MONITOR=n found to patch (may already be y)")
 
     def profiles_for_report(self, report: DriverReport) -> list[DriverProfile]:
         found: list[DriverProfile] = []

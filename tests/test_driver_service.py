@@ -33,6 +33,7 @@ class DriverServiceTests(unittest.TestCase):
         self.assertEqual(prof.id, "rtl8192eu")
         self.assertEqual(prof.good_module, "8192eu")
         self.assertEqual(prof.install_method, "git_dkms")
+        self.assertIn("Mange", prof.git_url)
 
     def test_parse_wireless_usb_generic(self) -> None:
         svc = DriverService()
