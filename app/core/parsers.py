@@ -164,7 +164,7 @@ def iface_is_monitor(iwconfig_or_iw_output: str, iface: str) -> bool:
         iwconfig_or_iw_output,
         re.MULTILINE | re.DOTALL,
     )
-    if block and re.search(r"Mode:Monitor", block.group(0), re.IGNORECASE):
+    if block and re.search(r"Mode:\s*Monitor", block.group(0), re.IGNORECASE):
         return True
     # iw dev style
     return iface in parse_iw_monitor_interfaces(iwconfig_or_iw_output)

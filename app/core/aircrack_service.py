@@ -90,11 +90,46 @@ class AircrackService:
         return sorted(set(ifaces))
 
     # ----------------------------------------------------------- monitor mode
+    # ----------------------------------------------------------- monitor mode
+    # These Realtek out-of-tree drivers are NOT mac80211 — `iw set type monitor`
+    # fails with -95 / Operation not supported. Use iwconfig instead.
+    IOCTL_MONITOR_DRIVERS = frozenset(
+        {
+            "8192eu",
+            "rtl8192eu",
+            "8188eu",
+            "r8188eu",
+            "8812au",
+            "8814au",
+            "8821au",
+            "88XXau",
+            "rtl88xxau",
+        }
+    )
+
     def check_kill(self) -> tuple[bool, str]:
         self._emit("Running: airmon-ng check kill")
         code, out = self._helper.run_capture(["airmon-ng", "check", "kill"])
         self._emit(out.strip() or "(no output)")
         return code == 0, out
+
+    def _iface_driver(self, interface: str) -> str:
+        link = Path(f"/sys/class/net/{interface}/device/driver")
+        try:
+            if link.exists() or link.is_symlink():
+                return link.resolve().name
+        except OSError:
+            pass
+        return ""
+
+    def _uses_ioctl_monitor(self, interface: str) -> bool:
+        driver = self._iface_driver(interface).lower()
+        if not driver:
+            return False
+        if driver in {d.lower() for d in self.IOCTL_MONITOR_DRIVERS}:
+            return True
+        # Heuristic: many Realtek dkms modules
+        return any(x in driver for x in ("8192eu", "8188eu", "88xxau", "8812au", "8814au"))
 
     def start_monitor(
         self,
@@ -113,21 +148,12 @@ class AircrackService:
 
         existing = self._discover_monitor_iface(preferred=interface)
         if existing and not force_reset:
-            # Soft path: still re-up + hard-reset via iw (rtl8xxxu often
-            # reports monitor but captures nothing until reset).
-            self._emit(
-                f"Monitor reported on {existing} — forcing iw reset so RX works…"
-            )
-            ok_iw, iw_out = self._enable_monitor_via_iw(existing)
-            self._emit(iw_out)
-            mon = existing if ok_iw else self._discover_monitor_iface(preferred=interface)
-            if mon:
-                self._helper.run_capture(["ip", "link", "set", mon, "up"])
-                self.session.interface = interface
-                self.session.monitor_interface = mon
-                self._emit(f"Monitor interface: {mon}")
-                self._log_iface_diag(mon)
-                return True, iw_out, mon
+            self._helper.run_capture(["ip", "link", "set", existing, "up"])
+            self.session.interface = interface
+            self.session.monitor_interface = existing
+            self._emit(f"Monitor already active on {existing}")
+            self._log_iface_diag(existing)
+            return True, f"Monitor already active on {existing}", existing
 
         self._emit(f"Running: airmon-ng start {interface}")
         code, out = self._helper.run_capture(["airmon-ng", "start", interface])
@@ -140,33 +166,37 @@ class AircrackService:
         if not mon:
             mon = self._discover_monitor_iface(preferred=interface)
 
-        if not mon:
+        # airmon may claim success while iface is still managed (rtl8192eu) —
+        # force the correct API for this driver.
+        target = mon or interface
+        if not self._discover_monitor_iface(preferred=target):
             self._emit(
-                "airmon-ng did not report a clear monitor iface; "
-                f"trying iw fallback on {interface}…"
+                f"Confirming monitor on {target} "
+                f"(driver={self._iface_driver(target) or 'unknown'})…"
             )
-            ok_iw, iw_out = self._enable_monitor_via_iw(interface)
-            out = (out or "") + "\n" + iw_out
-            if ok_iw:
-                mon = interface
+            ok_set, set_out = self._enable_monitor(target)
+            out = (out or "") + "\n" + set_out
+            if ok_set:
+                mon = target
 
         if not mon:
             mon = self._discover_monitor_iface(preferred=interface)
 
         if mon:
-            # Always finish with a clean iw monitor cycle for rtl8xxxu
-            self._emit(f"Hardening monitor on {mon} via iw…")
-            self._enable_monitor_via_iw(mon)
             self._helper.run_capture(["ip", "link", "set", mon, "up"])
             self.session.interface = interface
             self.session.monitor_interface = mon
             self._emit(f"Monitor interface: {mon}")
             self._log_iface_diag(mon)
+            if not self._discover_monitor_iface(preferred=mon):
+                self._emit(
+                    "WARNING: monitor may not have stuck — check iwconfig Mode:Monitor"
+                )
             return True, out, mon
         return False, out or "Could not determine monitor interface", None
 
     def prepare_for_scan(self) -> None:
-        """Always check-kill + force monitor reset before airodump (Realtek-safe)."""
+        """Check-kill + ensure monitor before airodump (iw OR iwconfig)."""
         mon = self.session.monitor_interface
         iface = self.session.interface or mon
         if not mon and not iface:
@@ -179,27 +209,28 @@ class AircrackService:
         self.check_kill()
         self._helper.run_capture(["rfkill", "unblock", "all"])
 
-        ok_iw, iw_out = self._enable_monitor_via_iw(target)
-        self._emit(iw_out)
-        if not ok_iw:
-            # Last resort: airmon-ng start
-            ok, _out, new_mon = self.start_monitor(
-                target, auto_check_kill=False, force_reset=True
-            )
-            if not ok or not new_mon:
-                raise RuntimeError(
-                    "Could not enable monitor mode. "
-                    "Try: Stop monitor → Start monitor, or replug the USB adapter."
-                )
-            target = new_mon
-        else:
-            target = target
-
         still = self._discover_monitor_iface(preferred=target)
+        if not still:
+            ok_set, set_out = self._enable_monitor(target)
+            self._emit(set_out)
+            if not ok_set:
+                ok, _out, new_mon = self.start_monitor(
+                    target, auto_check_kill=False, force_reset=True
+                )
+                if not ok or not new_mon:
+                    raise RuntimeError(
+                        "Could not enable monitor mode. "
+                        "For RTL8192EU use iwconfig Mode:Monitor (not iw). "
+                        "Replug the adapter and try Start monitor again."
+                    )
+                target = new_mon
+            still = self._discover_monitor_iface(preferred=target)
+
         if not still:
             raise RuntimeError(
                 f"{target} is not in monitor mode after reset. "
-                "rtl8xxxu may need a better driver (e.g. aircrack-ng rtl8188eus)."
+                "Check Drivers step / 8192eu module, then: "
+                "ifconfig wlan0 down; iwconfig wlan0 mode monitor; ifconfig wlan0 up"
             )
 
         self._helper.run_capture(["ip", "link", "set", still, "up"])
@@ -212,7 +243,10 @@ class AircrackService:
         _c, iw_out = self._helper.run_capture(["iw", "dev", iface, "info"])
         snippet = (iw_out or "").strip() or "(no iw info)"
         self._emit(f"iw {iface} info:\n{snippet}")
-        _c2, rf = self._helper.run_capture(["rfkill", "list"])
+        _c2, iwc = self._helper.run_capture(["iwconfig", iface])
+        if iwc.strip():
+            self._emit(f"iwconfig {iface}:\n{iwc.strip()}")
+        _c3, rf = self._helper.run_capture(["rfkill", "list"])
         if rf and re.search(r"Soft blocked:\s*yes|Hard blocked:\s*yes", rf, re.I):
             self._emit("WARNING: rfkill shows a block — ran unblock; replug if still blocked")
             self._emit(rf.strip())
@@ -238,7 +272,11 @@ class AircrackService:
         if mon:
             _c, iw_out = self._helper.run_capture(["iw", "dev", mon, "info"])
             lines.append((iw_out or "").strip() or f"No iw info for {mon}")
-            if "type monitor" not in (iw_out or "").lower():
+            _c2, iwc = self._helper.run_capture(["iwconfig", mon])
+            if iwc.strip():
+                lines.append(iwc.strip())
+            in_mon = self._discover_monitor_iface(preferred=mon) == mon
+            if not in_mon:
                 lines.append("NOT in monitor mode — that explains empty scans.")
 
         _c, check = self._helper.run_capture(["airmon-ng", "check"])
@@ -247,26 +285,22 @@ class AircrackService:
                 "NetworkManager/wpa_supplicant still running — they break scanning."
             )
 
-        lines.append(
-            "Tip: stock rtl8xxxu on RTL8188EUS often fails monitor RX. "
-            "If iw shows monitor but CSV stays header-only, install aircrack-ng "
-            "rtl8188eus driver or try another adapter."
-        )
+        driver = self._iface_driver(mon) if mon else ""
+        if driver:
+            lines.append(f"Driver: {driver}")
+            if self._uses_ioctl_monitor(mon or ""):
+                lines.append(
+                    "This driver uses iwconfig for monitor (not iw set type monitor)."
+                )
+
         msg = "\n".join(lines)
         self._emit(msg)
         return msg
 
-
     def _discover_monitor_iface(self, preferred: Optional[str] = None) -> Optional[str]:
-        """Find an interface already in monitor mode via iw/iwconfig."""
-        code, iw_out = self._helper.run_capture(["iw", "dev"])
-        mons = parsers.parse_iw_monitor_interfaces(iw_out) if code == 0 or iw_out else []
-        if preferred and preferred in mons:
-            return preferred
-        if mons:
-            return mons[0]
-
-        # iwconfig fallback
+        """Find an interface already in monitor mode via iwconfig first, then iw."""
+        # Prefer iwconfig — rtl8192eu often shows managed in `iw` even when
+        # iwconfig Mode:Monitor (or airmon thinks it enabled).
         _c, iwc = self._helper.run_capture(["iwconfig"])
         if preferred and parsers.iface_is_monitor(iwc, preferred):
             return preferred
@@ -274,7 +308,14 @@ class AircrackService:
         for name in ifaces:
             if parsers.iface_is_monitor(iwc, name):
                 return name
-        guess = None
+
+        code, iw_out = self._helper.run_capture(["iw", "dev"])
+        mons = parsers.parse_iw_monitor_interfaces(iw_out) if code == 0 or iw_out else []
+        if preferred and preferred in mons:
+            return preferred
+        if mons:
+            return mons[0]
+
         if preferred:
             guess = f"{preferred}mon" if not preferred.endswith("mon") else preferred
             if guess in ifaces:
@@ -284,8 +325,49 @@ class AircrackService:
                 return name
         return None
 
+    def _enable_monitor(self, interface: str) -> tuple[bool, str]:
+        """Enable monitor using the API this driver supports."""
+        if self._uses_ioctl_monitor(interface):
+            self._emit(
+                f"{interface} uses ioctl driver "
+                f"({self._iface_driver(interface)}) — using iwconfig, not iw"
+            )
+            return self._enable_monitor_via_iwconfig(interface)
+
+        ok, out = self._enable_monitor_via_iw(interface)
+        if not ok and re.search(r"Operation not supported|not supported", out, re.I):
+            self._emit("iw failed — falling back to iwconfig mode monitor")
+            return self._enable_monitor_via_iwconfig(interface)
+        return ok, out
+
+    def _enable_monitor_via_iwconfig(self, interface: str) -> tuple[bool, str]:
+        """Legacy Realtek (8192eu/8188eu): iwconfig mode monitor."""
+        logs: list[str] = []
+        for cmd in (
+            ["ip", "link", "set", interface, "down"],
+            ["iwconfig", interface, "mode", "monitor"],
+            ["ip", "link", "set", interface, "up"],
+        ):
+            self._emit("Running: " + " ".join(cmd))
+            code, out = self._helper.run_capture(cmd)
+            chunk = out.strip() or f"(exit {code})"
+            logs.append(" ".join(cmd) + " -> " + chunk)
+            self._emit(chunk)
+            if code != 0 and "mode" in cmd:
+                return False, "\n".join(logs)
+
+        mon = self._discover_monitor_iface(preferred=interface)
+        if mon:
+            return True, "\n".join(logs)
+        # Some 8192eu builds only show via iwconfig after a moment
+        time.sleep(0.5)
+        _c, iwc = self._helper.run_capture(["iwconfig", interface])
+        if parsers.iface_is_monitor(iwc, interface):
+            return True, "\n".join(logs)
+        return False, "\n".join(logs) + "\nMonitor mode not confirmed after iwconfig"
+
     def _enable_monitor_via_iw(self, interface: str) -> tuple[bool, str]:
-        """Set type monitor with iw (works on many mac80211 Realtek sticks)."""
+        """Set type monitor with iw (mac80211 drivers only)."""
         logs: list[str] = []
         for cmd in (
             ["ip", "link", "set", interface, "down"],
@@ -300,11 +382,10 @@ class AircrackService:
             if code != 0 and "set type monitor" in " ".join(cmd):
                 return False, "\n".join(logs)
 
-        # Confirm
         mon = self._discover_monitor_iface(preferred=interface)
         if mon:
             return True, "\n".join(logs)
-        return False, "\n".join(logs) + "\nMonitor mode not confirmed after iw fallback"
+        return False, "\n".join(logs) + "\nMonitor mode not confirmed after iw"
 
     def stop_monitor(self, mon_iface: Optional[str] = None) -> tuple[bool, str]:
         target = mon_iface or self.session.monitor_interface
@@ -315,17 +396,25 @@ class AircrackService:
         self._emit(out.strip() or "(no output)")
         restored = parsers.parse_airmon_disabled_iface(out)
 
-        # If still in monitor (airmon no-op / same-iface Realtek), restore via iw
         still = self._discover_monitor_iface(preferred=target)
         if still == target:
-            self._emit(f"Trying iw managed restore on {target}…")
-            for cmd in (
-                ["ip", "link", "set", target, "down"],
-                ["iw", "dev", target, "set", "type", "managed"],
-                ["ip", "link", "set", target, "up"],
-            ):
-                c, o = self._helper.run_capture(cmd)
-                self._emit((o.strip() or f"(exit {c})"))
+            self._emit(f"Restoring managed mode on {target}…")
+            if self._uses_ioctl_monitor(target):
+                for cmd in (
+                    ["ip", "link", "set", target, "down"],
+                    ["iwconfig", target, "mode", "managed"],
+                    ["ip", "link", "set", target, "up"],
+                ):
+                    c, o = self._helper.run_capture(cmd)
+                    self._emit((o.strip() or f"(exit {c})"))
+            else:
+                for cmd in (
+                    ["ip", "link", "set", target, "down"],
+                    ["iw", "dev", target, "set", "type", "managed"],
+                    ["ip", "link", "set", target, "up"],
+                ):
+                    c, o = self._helper.run_capture(cmd)
+                    self._emit((o.strip() or f"(exit {c})"))
             restored = restored or target
 
         self.session.monitor_interface = None
